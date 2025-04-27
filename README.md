@@ -29,7 +29,7 @@ It satisfies all baseline requirements for COSC 473 A2 and adds a polished text-
 - Written in **Rust 2021**.
 - Networked with **libp2p** (pub-sub + request/response).
 - Cross-platform (Linux, macOS, Windows).
-- No central server required – discovery via **mDNS** on-LAN and an optional **rendezvous server** for wider internet peers.
+- No central server required – discovery via **mDNS** on-LAN.
 
 ---
 
@@ -44,7 +44,7 @@ It satisfies all baseline requirements for COSC 473 A2 and adds a polished text-
 | **Visibility Controls** | `/hide` / `/show` toggles presence in the global list. |
 | **Directory Safety** | User-chosen **output directory** validated at startup and via `/setdir`. |
 | **Duplicate Nickname Guard** | Allowed, but each peer gets a warning if a clash is detected. |
-| **Auto + Manual Discovery** | mDNS + rendezvous; manual `/connect <peerID>` is also supported. |
+| **Auto + Manual Discovery** | mDNS; manual `/connect <peerID>` is also supported. |
 | **Reset Workflow** | `/reset` drops state and re-runs the initial join wizard. |
 | **Help Anywhere** | `/help` prints concise command help. |
 
@@ -110,10 +110,11 @@ It satisfies all baseline requirements for COSC 473 A2 and adds a polished text-
 | Command | Scope | Description |
 |---------|-------|-------------|
 | `/help` | anywhere | Print brief help. |
+| `/ping <peer>` | anywhere | Ping a peer by `nickname`, `PeerID`, or `multiaddr`. |
 | `/offer <path>` | private chat | Propose a file swap (must ≤ 1 GB). |
 | `/accept` | private chat | Accept the latest offer. |
 | `/decline` | private chat | Decline the latest offer. |
-| `/connect <peerID>` | global | Manually dial a peer by ID. |
+| `/connect <peer>` | global | Manually dial a peer by`nickname`, `PeerID`, or `multiaddr`. |
 | `/refresh` | global | Force immediate peer discovery refresh. |
 | `/hide` / `/show` | global | Toggle your visibility in the Global User List. |
 | `/setdir <path>` | global | Change download directory (validated). |
@@ -126,7 +127,7 @@ It satisfies all baseline requirements for COSC 473 A2 and adds a polished text-
 1. **Join Wizard**  
    1. Prompt for **nickname**.  
    2. Prompt for **download directory** – must exist & be writable.  
-   3. Connect to **mDNS** + optional **rendezvous server** (flag `--rendezvous <multiaddr>`).  
+   3. Connect to **mDNS**.
    4. Default **visibility ON**; first heartbeat sent immediately.
 
 2. **Heartbeat**  
@@ -168,14 +169,13 @@ cargo build --release   # target/release/swapbytes
 ### Quick Start (2 local terminals)
 
 ```bash
-# Terminal A (acts as rendezvous too):
+# Terminal A:
 ./target/release/swapbytes --nick alice \
-  --dir ~/Downloads/swapbytes_alice --bootstrap false
+  --dir ~/Downloads/swapbytes_alice --bootstrap true
 
 # Terminal B:
 ./target/release/swapbytes --nick bob \
-  --dir ~/Downloads/swapbytes_bob \
-  --rendezvous /ip4/127.0.0.1/tcp/7654
+  --dir ~/Downloads/swapbytes_bob
 ```
 
 #### CLI Flags
@@ -184,7 +184,6 @@ cargo build --release   # target/release/swapbytes
 |------|---------|---------|
 | `--nick <name>` | prompt | Set nickname non-interactively. |
 | `--dir <path>` | prompt | Set download directory non-interactively. |
-| `--rendezvous <addr>` | _none_ | Multi-addr of rendezvous server. |
 | `--bootstrap <bool>` | `true` | Enable mDNS discovery (LAN). |
 
 ---

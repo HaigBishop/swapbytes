@@ -12,14 +12,15 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 // libp2p imports
-use libp2p::{noise, ping, swarm::SwarmEvent, tcp, yamux, Multiaddr};
+use libp2p::{noise, ping, swarm::SwarmEvent, tcp, yamux};
 
 // Terminal UI imports
 use crossterm::event;
+use crossterm::event::{KeyCode, KeyEventKind};
 
 // Local modules
 mod tui;
-use tui::{App, AppEvent};
+use tui::{App, AppEvent, InputMode};
 
 /// Entry point: sets up TUI, libp2p, and event loop.
 #[tokio::main]
@@ -31,8 +32,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     // --- Event channel and cancellation token ---
     // Used to communicate between background tasks and the UI loop.
-    let (tx, mut rx) = mpsc::unbounded_channel();
+    let (tx, mut rx) = mpsc::unbounded_channel::<AppEvent>(); // Specify type
     let cancel = CancellationToken::new();
+
+    // Channel for commands from UI loop to Swarm task
+    let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel::<AppEvent>();
 
 
     // --- libp2p Swarm setup ---
@@ -53,24 +57,36 @@ async fn main() -> Result<(), Box<dyn Error>> {
     swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
 
 
-    // --- Optional: dial a peer if address is given as CLI argument ---
-    if let Some(addr) = std::env::args().nth(1) {
-        let remote: Multiaddr = addr.parse()?;
-        swarm.dial(remote)?;
-        println!("Dialed {addr}");
-    }
-
-
-    // --- Background task: forward swarm events to UI ---
-    let swarm_tx = tx.clone();
+    // --- Background task: forward swarm events to UI ----
+    let swarm_tx = tx.clone(); // For Swarm->UI events
     let swarm_cancel = cancel.clone();
     tokio::spawn(async move {
+        // Swarm task owns swarm and swarm_tx
         let mut swarm = swarm;
         loop {
             tokio::select! {
                 _ = swarm_cancel.cancelled() => break, // Graceful shutdown
+                
+                // Handle commands from the UI (e.g., Dial)
+                Some(cmd) = cmd_rx.recv() => {
+                    match cmd {
+                        AppEvent::Dial(addr) => {
+                            let log_msg = match swarm.dial(addr.clone()) {
+                                Ok(()) => format!("Dialing {addr}"),
+                                Err(e) => format!("Dial error: {e}"),
+                            };
+                            // Send log message back to UI
+                            let _ = swarm_tx.send(AppEvent::LogMessage(log_msg));
+                        }
+                        // Ignore other commands if any were sent here by mistake
+                        _ => {}
+                    }
+                }
+
+                // Forward swarm events to the UI
                 ev = swarm.next() => {
                     if let Some(ev) = ev {
+                        // Use swarm_tx to send Swarm events
                         let _ = swarm_tx.send(AppEvent::Swarm(ev));
                     } else {
                         break;
@@ -82,6 +98,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
 
     // --- Background task: handle keyboard input ---
+    let kb_tx = tx.clone(); // Clone tx for the keyboard task -> UI
     let kb_cancel = cancel.clone();
     tokio::spawn(async move {
         loop {
@@ -89,7 +106,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
             // Poll for key events every 250ms (non-blocking)
             if event::poll(Duration::from_millis(250)).unwrap() {
                 if let event::Event::Key(key) = event::read().unwrap() {
-                    if tx.send(AppEvent::Input(key)).is_err() {
+                    // Use kb_tx here
+                    if kb_tx.send(AppEvent::Input(key)).is_err() {
                         break; // UI gone
                     }
                 }
@@ -105,7 +123,33 @@ async fn main() -> Result<(), Box<dyn Error>> {
     loop {
         // Redraw UI only if something changed
         if redraw {
-            terminal.draw(|f| f.render_widget(&app, f.area()))?;
+            terminal.draw(|f| {
+                f.render_widget(&app, f.area());
+                // Set cursor visibility and position based on input mode
+                match app.input_mode {
+                    InputMode::Normal => {}, // Do nothing, cursor hidden by default
+                    #[allow(clippy::cast_possible_truncation)]
+                    InputMode::Editing => {
+                        // Calculate layout again (or pass it down) to find input box coords
+                        // This is slightly inefficient, maybe refactor later.
+                        let block = ratatui::widgets::Block::bordered().border_set(ratatui::symbols::border::THICK);
+                        let inner_area = block.inner(f.area());
+                        let chunks = ratatui::layout::Layout::vertical([
+                            ratatui::layout::Constraint::Min(1),
+                            ratatui::layout::Constraint::Length(3),
+                        ])
+                        .split(inner_area);
+                        let input_area = chunks[1];
+
+                        f.set_cursor_position(ratatui::layout::Position::new(
+                            // Draw the cursor at the current position in the input field.
+                            input_area.x + app.cursor_position as u16 + 1,
+                            // Move one line down, from the border to the input line
+                            input_area.y + 1,
+                        ));
+                    }
+                }
+            })?;
             redraw = false;
         }
 
@@ -117,22 +161,94 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         SwarmEvent::NewListenAddr { address, .. } => {
                             app.push(format!("Listening on {address}"));
                         }
-                        SwarmEvent::Behaviour(be) => {
-                            app.push(format!("{be:?}"));
+                        SwarmEvent::Behaviour(ping::Event { peer, result, .. }) => {
+                            match result {
+                                Ok(latency) => {
+                                    app.push(format!("Successfully pinged peer: {peer} ({latency:?})"));
+                                }
+                                Err(e) => {
+                                    // Log ping errors as well
+                                    app.push(format!("Ping failed for peer: {peer} ({e:?})"));
+                                }
+                            }
                         }
-                        _ => {}
+                        SwarmEvent::OutgoingConnectionError { error, .. } => {
+                            app.push(format!("Outgoing connection error: {error}"));
+                        }
+                        _ => {
+                            // Log other swarm events if needed
+                        }
                     }
                     redraw = true;
                 }
                 AppEvent::Input(key) => {
-                    // Exit on 'q' key press
-                    if key.kind == event::KeyEventKind::Press
-                        && key.code == event::KeyCode::Char('q')
+                    // Always handle Ctrl+q first regardless of mode
+                    if key.kind == KeyEventKind::Press
+                        && key.code == KeyCode::Char('q')
+                        && key.modifiers.contains(event::KeyModifiers::CONTROL)
                     {
                         cancel.cancel();   // Signal background tasks to stop
                         app.exit = true;   // End UI loop
+                        continue; // Skip further processing
+                    }
+
+                    match app.input_mode {
+                        InputMode::Normal => {
+                            // Enter editing mode on '/'
+                            if key.kind == KeyEventKind::Press && key.code == KeyCode::Char('/') {
+                                app.input_mode = InputMode::Editing;
+                                app.input.clear(); // Clear previous input
+                                app.input.push('/'); // Start with '/'
+                                app.cursor_position = 1; // Position cursor after '/'
+                                redraw = true;
+                            }
+                            // Other key presses ignored in normal mode
+                        }
+                        InputMode::Editing => {
+                            if key.kind == KeyEventKind::Press {
+                                match key.code {
+                                    KeyCode::Enter => {
+                                        // submit_command now returns an optional event
+                                        if let Some(event) = app.submit_command() {
+                                            // Send the event to the command channel for the swarm task
+                                            let _ = cmd_tx.send(event); // Use cmd_tx
+                                        }
+                                        redraw = true;
+                                    }
+                                    KeyCode::Char(to_insert) => {
+                                        app.enter_char(to_insert);
+                                        redraw = true;
+                                    }
+                                    KeyCode::Backspace => {
+                                        app.delete_char();
+                                        redraw = true;
+                                    }
+                                    KeyCode::Left => {
+                                        app.move_cursor_left();
+                                        redraw = true;
+                                    }
+                                    KeyCode::Right => {
+                                        app.move_cursor_right();
+                                        redraw = true;
+                                    }
+                                    KeyCode::Esc => {
+                                        app.input_mode = InputMode::Normal;
+                                        // Optional: Clear input on Esc? No, keep it for now.
+                                        redraw = true;
+                                    }
+                                    _ => {} // Ignore other keys in editing mode
+                                }
+                            }
+                        }
                     }
                 }
+                // Handle events received from background tasks
+                AppEvent::LogMessage(msg) => {
+                    app.push(msg);
+                    redraw = true;
+                }
+                // Dial is handled by the swarm task now, ignore if received here
+                AppEvent::Dial(_) => {}
             }
         }
 

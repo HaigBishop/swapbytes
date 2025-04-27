@@ -54,6 +54,15 @@ impl App {
             self.log.drain(0..self.log.len() - MAX_LOG_LINES);
         }
     }
+    /// Adds a new message line to the log, maintaining a maximum history size.
+    /// Compared to push, this prepends a "[LOG] " to the message.
+    pub fn log<S: Into<String>>(&mut self, line: S) {
+        const MAX_LOG_LINES: usize = 10;
+        self.log.push(format!("[LOG] {}", line.into()));
+        if self.log.len() > MAX_LOG_LINES {
+            self.log.drain(0..self.log.len() - MAX_LOG_LINES);
+        }
+    }
 
     // --- Input Handling Methods (adapted from input_example.rs) ---
 
@@ -119,6 +128,7 @@ impl App {
 
         let mut event_to_send = None;
 
+        // /ping command
         if *command_name == "/ping" {
             if args.is_empty() {
                 self.push("Usage: /ping <multiaddr>".to_string());
@@ -134,6 +144,19 @@ impl App {
                     }
                 }
             }
+
+        // /quit command
+        } else if *command_name == "/quit" || *command_name == "/q" {
+            // Signal the main loop to quit
+            event_to_send = Some(AppEvent::Quit);
+
+        // /help command
+        } else if *command_name == "/help" || *command_name == "/h" {
+            self.push("SwapBytes Commands:".to_string());
+            self.push("  /ping <multiaddr> - Ping a peer.".to_string());
+            self.push("  /quit             - Exit SwapBytes.".to_string());
+
+        // Unknown command
         } else if !self.input.trim().is_empty() { // Only show unknown if not empty
             self.push(format!("Unknown command: {}", command_name));
         }
@@ -151,8 +174,8 @@ impl Widget for &App {
     fn render(self, area: Rect, buf: &mut Buffer) {
         // --- Main Block ---
         let title_bottom = match self.input_mode {
-            InputMode::Normal => " (/: Input | Ctrl+q: Quit) ".bold(),
-            InputMode::Editing => " (Esc: Exit Input | Enter: Submit) ".bold(),
+            InputMode::Normal => " (Input: / | Quit: Ctrl+q) ".bold(),
+            InputMode::Editing => " (Exit Input: Esc | Submit: Enter) ".bold(),
         };
         let block = Block::bordered()
             .title(" SwapBytes Console ".bold())
@@ -206,6 +229,7 @@ impl Widget for &App {
 }
 
 /// Events that drive the application's state changes.
+#[derive(Debug)]
 pub enum AppEvent {
     /// User keyboard input.
     Input(event::KeyEvent),
@@ -215,4 +239,6 @@ pub enum AppEvent {
     Dial(Multiaddr),
     /// Message to be logged in the UI (sent from Swarm task to UI).
     LogMessage(String),
+    /// User command to quit the application.
+    Quit,
 }

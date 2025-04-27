@@ -155,6 +155,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
         // Wait for next event (from swarm or keyboard)
         if let Some(ev) = rx.recv().await {
+            // LOG EVENTS
+            // app.log(format!("Received event: {:?}", ev));
             match ev {
                 AppEvent::Swarm(se) => {
                     match &se {
@@ -210,10 +212,24 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                     KeyCode::Enter => {
                                         // submit_command now returns an optional event
                                         if let Some(event) = app.submit_command() {
-                                            // Send the event to the command channel for the swarm task
-                                            let _ = cmd_tx.send(event); // Use cmd_tx
+                                            match event {
+                                                AppEvent::Quit => {
+                                                    // Handle Quit directly here
+                                                    cancel.cancel();
+                                                    app.exit = true;
+                                                }
+                                                // Send other commands (like Dial) to the swarm task
+                                                AppEvent::Dial(addr) => {
+                                                    let _ = cmd_tx.send(AppEvent::Dial(addr));
+                                                }
+                                                // Ignore any other event types returned by submit_command
+                                                _ => {}
+                                            }
                                         }
-                                        redraw = true;
+                                        // Redraw only if we didn't just handle Quit
+                                        if !app.exit {
+                                            redraw = true;
+                                        }
                                     }
                                     KeyCode::Char(to_insert) => {
                                         app.enter_char(to_insert);
@@ -249,6 +265,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 }
                 // Dial is handled by the swarm task now, ignore if received here
                 AppEvent::Dial(_) => {}
+                // Handle quit command from the TUI input (this is unreachable) but needed for exhaustive match
+                AppEvent::Quit => {}
             }
         }
 

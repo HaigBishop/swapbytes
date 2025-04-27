@@ -5,7 +5,14 @@ edition = "2024"
 license = "MIT"
 
 [dependencies]
+    # P2P networking
     libp2p = { version = "0.55", features = ["noise", "ping", "tcp", "tokio", "yamux"] }
+
+    # Async primitives
     futures = "0.3.30"
+
+    # Async runtime
     tokio = { version = "1.37.0", features = ["full"] }
+
+    # Structured logging
     tracing-subscriber = { version = "0.3", features = ["env-filter"] }

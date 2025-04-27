@@ -50,31 +50,58 @@ It satisfies all baseline requirements for COSC 473 A2 and adds a polished text-
 
 ---
 
-## User Interface Layout
+### User Interface Layout  
+
+**Global chat view:**
+```
+┌───────────────────────────────────────────────┬──────────────┐
+│               Global Chat 📣                  │  Users List  │
+│  [you] hello bob                              │  alice       │
+│  [bob] hey wanna trade?                       │  (7ifp9x)    │
+│  …                                            │  bob         │
+│                                               │  (s8sfk9)    │
+│                                               │  …           │
+├───────────────────────────────────────────────┤              │
+│               Console Pane ⌨️                  │              │
+│  > /offer draft.md                            │              │
+└───────────────────────────────────────────────┴──────────────┘
+```
+**Private chat view:**
 
 ```
-┌──────────────────────────────────┬──────────────────────────────┐
-│          Global Chat 📣          │      Private Chat 🔐         │
-│  [nick] hello everyone           │  [you ➜ bob] hi, trade?      │
-│  ...                             │  [bob] /offer notes.pdf      │
-├───────────────┬──────────────────┤  >> Accept file notes.pdf ?  │
-│  Global Users │ Input ⌨️          │  >> (Y)es / (N)o             │
-│ ───────────── │ /accept          │                              │
-│  alice  (12d…)| /offer draft.md  │                              │
-│  bob    (k2…) │ ...              │                              │
-└───────────────┴──────────────────┴──────────────────────────────┘
+┌───────────────────────────────────────────────┬──────────────┐
+│              Private Chat 🔐 (bob)            │  Users List  │
+│  [you ➜ bob] hi, yeah let's trade!            │  alice       │
+│  [bob] /offer notes.pdf                       │  (7ifp9x)    │
+│  >> Accept file notes.pdf?  (Y/N)             │  *bob*       │
+│  …                                            │  (s8sfk9)    │
+│                                               │  …           │
+├───────────────────────────────────────────────┤              │
+│               Console Pane ⌨️                  │              │
+│  > /accept                                    │              │
+└───────────────────────────────────────────────┴──────────────┘
 ```
 
-*Left top–bottom*  
-- **Global Chat** scrolls.  
-- **Global Users** lists online peers (`nickname` + `PeerID`-short).  
+#### TUI Panes
+- **Users List** 
+    - Occupies full height and 1/4 of width on the right side (scrollable)
+    - Always visible, shows nickname + PeerIDs and online/offline status.  
+    - Asterisk marks the peer whose chat is currently in view.
+- **Chat Pane**
+    - Occupies the top 3⁄4 of height of left side (scrollable)
+    - Shows either: Global Chat or Private Chat
+    - To enter Global Chat run `/global` or hit `ESC`
+    - To enter Private Chat run `/chat <nickname>` or select a user in the Users List
+- **Console Pane**
+    - Occupies the bottom 1⁄4 of height of left side
+    - Always visible, shows console output and online/offline status. 
 
-*Right*  
-- **Private Chat** pane (switch with `Tab`).  
-- File-offer pop-up overlays in this pane.
+#### Trade offers
+- In a private chat, `/offer <file>` posts an interactive prompt (`Accept? Y/N`) inside the same pane.  
+- `/accept` or pressing **Y** begins the transfer; `/decline` or **N** cancels it.
 
-*Bottom*  
-- **Input box** captures commands or plain messages.
+
+
 
 ---
 
@@ -117,6 +144,7 @@ It satisfies all baseline requirements for COSC 473 A2 and adds a polished text-
 | Scenario | Behaviour |
 |----------|-----------|
 | `nickname` clash | Allowed, but both peers print a warning. |
+| File does not exist | Offer rejected, requester notified. |
 | File > 1 GB | Offer rejected, sender notified. |
 | Transfer failure / disconnect | Both peers see **“File transfer failed – please retry.”** |
 | Invalid download dir | App blocks until a valid, writable path is provided. |
@@ -180,41 +208,16 @@ bob> /reset   # re-run join wizard
 
 ---
 
-## Road-map
+## Future Features
 
-- [ ] Reputation points (+1/-1) persisted in a DHT.  
-- [ ] Themed rooms for topic-specific swaps.  
-- [ ] File-encryption using recipient’s public key before transfer.  
-- [ ] Resume-on-disconnect restartable transfers.  
-
----
-
-## Contributing
-
-PRs welcome! Please open an issue first to discuss changes.  
-Code style: `rustfmt + clippy --all -- -D warnings`.
+- [ ] Reputation points (+1/-1) persisted in a DHT.
+- [ ] More advanced back-and-forth trading UX.
 
 ---
 
 ## License
 
-SwapBytes is released under the **MIT License**.
-
-```
-MIT License
-
-Copyright (c) 2025 Haig Bishop
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-(…full standard MIT text…)
-```
-
+SwapBytes is released under the **MIT License**. See the LICENSE file.
 
 
 ## Useful Links

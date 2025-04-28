@@ -135,6 +135,7 @@ It satisfies all baseline requirements for COSC 473 A2 and adds a polished text-
 | `/accept` | private chat | Accept the latest offer in the current private chat . |
 | `/decline` | private chat | Decline the latest offer in the current private chat . |
 | `/hide` / `/show` | global | Toggle your visibility in the Global User List. |
+| `/forget` | global | Clear the list of known peers (they will reappear on next heartbeat). |
 | `/ping <multiaddr>` | global | Ping a peer by `multiaddr`. |
 | `/quit`           | global       | Quit the application    |
 

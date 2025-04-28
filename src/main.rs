@@ -455,17 +455,21 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
                                 // --- Handle forwarded Gossipsub Messages to update last_seen ---
                                 // This ensures peers stay online if they are forwarding messages (e.g., heartbeats)
+                                // It also re-adds peers to the list if they were forgotten.
                                 SwarmEvent::Behaviour(SwapBytesBehaviourEvent::Gossipsub(gossipsub::Event::Message {
                                     propagation_source: peer_id, // The peer who forwarded the message
                                     .. // Ignore other fields here, we just need the source
                                 })) => {
-                                    if let Some(peer_info) = app.peers.get_mut(&peer_id) {
-                                        peer_info.last_seen = Instant::now();
-                                        // If they were marked offline, mark them online again upon receiving a message
-                                        if peer_info.status == OnlineStatus::Offline {
-                                            peer_info.status = OnlineStatus::Online;
-                                        }
-                                    }
+                                    // Use entry API to insert if not present or update if present
+                                    let now = Instant::now();
+                                    let peer_info = app.peers.entry(peer_id).or_insert_with(|| PeerInfo {
+                                        nickname: None, // Nickname might be updated separately via NicknameUpdated event
+                                        status: OnlineStatus::Online, // Assume online if we got a message
+                                        last_seen: now,
+                                    });
+                                    // Update existing entry's status and last_seen
+                                    peer_info.last_seen = now;
+                                    peer_info.status = OnlineStatus::Online; // Mark online on any message received
                                     // If the peer is not in the map yet, PeerDiscovered or NicknameUpdated will handle adding them.
                                 }
 

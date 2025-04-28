@@ -164,6 +164,11 @@ pub fn process_command(command_input: &str, app: &mut App) -> Option<AppEvent> {
                 }
             }
         }
+        "forget" => {
+            let num_peers = app.peers.len();
+            app.peers.clear();
+            app.push(format!("Forgot {} known peers.", num_peers));
+        }
         "hide" => {
             if app.is_visible {
                 app.is_visible = false;
@@ -192,6 +197,7 @@ pub fn process_command(command_input: &str, app: &mut App) -> Option<AppEvent> {
             app.push("  /setname <name>   - Set your nickname (3-16 chars, a-z, A-Z, 0-9, -, _).".to_string());
             app.push("  /chat <name>      - Switch chat (e.g. 'bob' or 'global').".to_string());
             app.push("  /ping <multiaddr> - Ping a peer.".to_string());
+            app.push("  /forget           - Forget all known peers.".to_string());
             app.push("  /hide             - Set your status to appear offline.".to_string());
             app.push("  /show             - Set your status to appear online.".to_string());
             app.push("  /quit             - Exit SwapBytes.".to_string());

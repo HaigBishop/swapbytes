@@ -17,10 +17,15 @@ use libp2p::{noise, ping, swarm::SwarmEvent, tcp, yamux};
 // Terminal UI imports
 use crossterm::event;
 use crossterm::event::{KeyCode, KeyEventKind};
+use ratatui::{
+    layout::{Constraint, Layout, Position},
+    symbols,
+    widgets::Block,
+};
 
 // Local modules
 mod tui;
-use tui::{App, AppEvent, InputMode};
+use tui::{App, AppEvent, InputMode, FocusPane};
 
 /// Entry point: sets up TUI, libp2p, and event loop.
 #[tokio::main]
@@ -124,27 +129,48 @@ async fn main() -> Result<(), Box<dyn Error>> {
         // Redraw UI only if something changed
         if redraw {
             terminal.draw(|f| {
+                // --- Draw main application widget --- 
+                // We draw the app first using its Widget impl
+                // This draws everything EXCEPT the stateful scrollbar
                 f.render_widget(&app, f.area());
-                // Set cursor visibility and position based on input mode
-                match app.input_mode {
-                    InputMode::Normal => {}, // Do nothing, cursor hidden by default
-                    #[allow(clippy::cast_possible_truncation)]
-                    InputMode::Editing => {
-                        // Calculate layout again (or pass it down) to find input box coords
-                        // This is slightly inefficient, maybe refactor later.
-                        let block = ratatui::widgets::Block::bordered().border_set(ratatui::symbols::border::THICK);
-                        let inner_area = block.inner(f.area());
-                        let chunks = ratatui::layout::Layout::vertical([
-                            ratatui::layout::Constraint::Min(1),
-                            ratatui::layout::Constraint::Length(3),
-                        ])
-                        .split(inner_area);
-                        let input_area = chunks[1];
 
-                        f.set_cursor_position(ratatui::layout::Position::new(
-                            // Draw the cursor at the current position in the input field.
+                // --- Calculate Console Log Area (needs to match tui.rs layout) --- 
+                // This is slightly duplicated logic, but needed here to place the scrollbar
+                let main_chunks = Layout::horizontal([
+                    Constraint::Percentage(75), 
+                    Constraint::Percentage(25),
+                ])
+                .split(f.area());
+                let left_area = main_chunks[0];
+                let left_chunks = Layout::vertical([
+                    Constraint::Percentage(67),
+                    Constraint::Percentage(33),
+                ])
+                .split(left_area);
+                let console_area = left_chunks[1];
+                let console_block = Block::bordered().border_set(symbols::border::THICK);
+                let console_inner_area = console_block.inner(console_area);
+                let console_chunks = Layout::vertical([
+                    Constraint::Min(1),
+                    Constraint::Length(3),
+                ])
+                .split(console_inner_area);
+                let log_area = console_chunks[0];
+
+                // --- Render Console Scrollbar --- 
+                // Update scrollbar state stored in app (ensure content len & viewport are correct)
+                app.console_viewport_height = log_area.height as usize;
+
+                // Scrollbar rendering removed - we'll keep just the keyboard scrolling functionality
+
+                // --- Set cursor position (only in Editing mode) ---
+                match app.input_mode {
+                    InputMode::Normal => {} // Cursor hidden by default
+                    InputMode::Editing => {
+                        // Input area calculation (already done above for scrollbar)
+                        let input_area = console_chunks[1]; 
+                        f.set_cursor_position(Position::new(
                             input_area.x + app.cursor_position as u16 + 1,
-                            // Move one line down, from the border to the input line
                             input_area.y + 1,
                         ));
                     }
@@ -155,8 +181,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
         // Wait for next event (from swarm or keyboard)
         if let Some(ev) = rx.recv().await {
-            // LOG EVENTS
-            // app.log(format!("Received event: {:?}", ev));
             match ev {
                 AppEvent::Swarm(se) => {
                     match &se {
@@ -184,27 +208,50 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     redraw = true;
                 }
                 AppEvent::Input(key) => {
-                    // Always handle Ctrl+q first regardless of mode
+                    // Always handle Ctrl+q first
                     if key.kind == KeyEventKind::Press
                         && key.code == KeyCode::Char('q')
                         && key.modifiers.contains(event::KeyModifiers::CONTROL)
                     {
-                        cancel.cancel();   // Signal background tasks to stop
-                        app.exit = true;   // End UI loop
-                        continue; // Skip further processing
+                        cancel.cancel();
+                        app.exit = true;
+                        continue;
                     }
 
                     match app.input_mode {
                         InputMode::Normal => {
-                            // Enter editing mode on '/'
-                            if key.kind == KeyEventKind::Press && key.code == KeyCode::Char('/') {
-                                app.input_mode = InputMode::Editing;
-                                app.input.clear(); // Clear previous input
-                                app.input.push('/'); // Start with '/'
-                                app.cursor_position = 1; // Position cursor after '/'
-                                redraw = true;
+                            if key.kind == KeyEventKind::Press {
+                                match key.code {
+                                    // Focus Switching
+                                    KeyCode::Tab => {
+                                        app.focused_pane = match app.focused_pane {
+                                            FocusPane::Chat => FocusPane::Console,
+                                            FocusPane::Console => FocusPane::UsersList,
+                                            FocusPane::UsersList => FocusPane::Chat,
+                                        };
+                                        redraw = true;
+                                    }
+                                    // Enter Editing Mode
+                                    KeyCode::Char('/') => {
+                                        app.input_mode = InputMode::Editing;
+                                        app.input.clear();
+                                        app.input.push('/');
+                                        app.cursor_position = 1;
+                                        redraw = true;
+                                    }
+                                    // Scrolling (only if Console focused)
+                                    KeyCode::Up if app.focused_pane == FocusPane::Console => {
+                                        app.console_scroll = app.console_scroll.saturating_sub(1);
+                                        redraw = true;
+                                    }
+                                    KeyCode::Down if app.focused_pane == FocusPane::Console => {
+                                        let max_scroll = app.log.len().saturating_sub(app.console_viewport_height);
+                                        app.console_scroll = app.console_scroll.saturating_add(1).min(max_scroll);
+                                        redraw = true;
+                                    }
+                                    _ => {} // Ignore other keys in normal mode
+                                }
                             }
-                            // Other key presses ignored in normal mode
                         }
                         InputMode::Editing => {
                             if key.kind == KeyEventKind::Press {
@@ -249,7 +296,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                     }
                                     KeyCode::Esc => {
                                         app.input_mode = InputMode::Normal;
-                                        // Optional: Clear input on Esc? No, keep it for now.
+                                        app.input.clear();
+                                        app.reset_cursor();
                                         redraw = true;
                                     }
                                     _ => {} // Ignore other keys in editing mode
@@ -258,15 +306,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         }
                     }
                 }
-                // Handle events received from background tasks
                 AppEvent::LogMessage(msg) => {
                     app.push(msg);
                     redraw = true;
                 }
-                // Dial is handled by the swarm task now, ignore if received here
                 AppEvent::Dial(_) => {}
-                // Handle quit command from the TUI input (this is unreachable) but needed for exhaustive match
-                AppEvent::Quit => {}
+                AppEvent::Quit => {} // Already handled in Editing mode Enter
             }
         }
 

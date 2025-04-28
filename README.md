@@ -23,10 +23,10 @@
 
 ## What is SwapBytes?
 
-SwapBytes is a **CLI/TUI application** that lets students (or anyone) **barter files directly with one another** in a fully decentralised network.  
+SwapBytes is a **CLI/TUI application** that lets users **barter files directly with one another** in a fully decentralised network.  
 It satisfies all baseline requirements for COSC 473 A2 and adds a polished text-user-interface plus extra QoL commands.
 
-- Written in **Rust 2021**.
+- Written in **Rust 2024**.
 - Networked with **libp2p** (pub-sub + request/response).
 - Cross-platform (Linux, macOS, Windows).
 - No central server required – discovery via **mDNS** on-LAN.
@@ -62,7 +62,7 @@ It satisfies all baseline requirements for COSC 473 A2 and adds a polished text-
 │                                               │  (s8sfk9)    │
 │                                               │  …           │
 ├───────────────────────────────────────────────┤              │
-│               Console Pane ⌨️                  │              │
+│               Console Pane ⌨️                 │              │
 │  > /offer draft.md                            │              │
 └───────────────────────────────────────────────┴──────────────┘
 ```
@@ -77,7 +77,7 @@ It satisfies all baseline requirements for COSC 473 A2 and adds a polished text-
 │  …                                            │  (s8sfk9)    │
 │                                               │  …           │
 ├───────────────────────────────────────────────┤              │
-│               Console Pane ⌨️                  │              │
+│               Console Pane ⌨️                 │              │
 │  > /accept                                    │              │
 └───────────────────────────────────────────────┴──────────────┘
 ```
@@ -109,16 +109,18 @@ It satisfies all baseline requirements for COSC 473 A2 and adds a polished text-
 
 | Command | Scope | Description |
 |---------|-------|-------------|
-| `/help` | anywhere | Print brief help. |
-| `/ping <peer>` | anywhere | Ping a peer by `nickname`, `PeerID`, or `multiaddr`. |
-| `/offer <path>` | private chat | Propose a file swap (must ≤ 1 GB). |
-| `/accept` | private chat | Accept the latest offer. |
-| `/decline` | private chat | Decline the latest offer. |
+| `/help` | global | Print brief help. |
+| `/ping <peer>` | global | Ping a peer by `nickname`, `PeerID`, or `multiaddr`. |
+| `/offer <path>` | private chat | Propose a file swap in the current private chat . |
+| `/accept` | private chat | Accept the latest offer in the current private chat . |
+| `/decline` | private chat | Decline the latest offer in the current private chat . |
 | `/connect <peer>` | global | Manually dial a peer by`nickname`, `PeerID`, or `multiaddr`. |
 | `/refresh` | global | Force immediate peer discovery refresh. |
 | `/hide` / `/show` | global | Toggle your visibility in the Global User List. |
 | `/setdir <path>` | global | Change download directory (validated). |
-| `/reset` | global | Wipe runtime state and restart the join wizard. |
+| `/setname <name>` | global | Change nickname (validated). |
+| `/reset`          | global       | Wipe runtime state and restart the join wizard.              |
+| `/quit`           | global       | Quit the application                                         |
 
 ---
 

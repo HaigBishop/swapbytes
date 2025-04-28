@@ -20,20 +20,26 @@ use libp2p::{ping, swarm::SwarmEvent};
 use libp2p::Multiaddr;
 
 /// Input modes for the TUI.
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub enum InputMode {
+    #[default]
     Normal,
     Editing,
 }
 
-impl Default for InputMode {
-    fn default() -> Self { InputMode::Normal }
+/// Represents the currently focused UI pane.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub enum FocusPane {
+    #[default]
+    Console,
+    Chat,
+    UsersList,
 }
 
 /// Application state for the TUI.
-#[derive(Default, Debug)]
+#[derive(Debug)]
 pub struct App {
-    /// Limited history of log messages.
+    /// Log history (limited).
     pub log: Vec<String>,
     /// Current value of the input box.
     pub input: String,
@@ -43,25 +49,65 @@ pub struct App {
     pub input_mode: InputMode,
     /// Flag indicating if the application should exit.
     pub exit: bool,
+    /// Currently focused pane.
+    pub focused_pane: FocusPane,
+    /// Vertical scroll position for the console log.
+    pub console_scroll: usize,
+    /// Height of the console viewport (number of visible lines).
+    pub console_viewport_height: usize,
 }
 
+impl Default for App {
+    fn default() -> Self {
+        App {
+            log: Vec::new(),
+            input: String::new(),
+            cursor_position: 0,
+            input_mode: InputMode::default(),
+            exit: false,
+            focused_pane: FocusPane::default(),
+            console_scroll: 0, // Start at the top
+            console_viewport_height: 1, // default minimal height
+        }
+    }
+}
+
+// Max number of lines to keep in the log history
+const MAX_LOG_LINES: usize = 1000;
+
 impl App {
-    /// Adds a new message line to the log, maintaining a maximum history size.
+    /// Adds a new message line to the log, maintaining a maximum history size
+    /// and auto-scrolling to the bottom.
     pub fn push<S: Into<String>>(&mut self, line: S) {
-        const MAX_LOG_LINES: usize = 10;
         self.log.push(line.into());
         if self.log.len() > MAX_LOG_LINES {
             self.log.drain(0..self.log.len() - MAX_LOG_LINES);
+            // Adjust scroll if necessary when lines are removed from the top
+            // This logic might not be strictly needed if we always scroll down,
+            // but it doesn't hurt.
+            let max_scroll = self.log.len().saturating_sub(1);
+            self.console_scroll = self.console_scroll.min(max_scroll);
         }
+        // Auto-scroll to the bottom respecting viewport height
+        let viewport = self.console_viewport_height.max(1);
+        let new_scroll_pos = self.log.len().saturating_sub(viewport);
+        self.console_scroll = new_scroll_pos;
     }
-    /// Adds a new message line to the log, maintaining a maximum history size.
-    /// Compared to push, this prepends a "[LOG] " to the message.
+
+    /// Adds a new message line to the log (prepended with "[LOG]"),
+    /// maintaining a maximum history size and auto-scrolling to the bottom.
     pub fn log<S: Into<String>>(&mut self, line: S) {
-        const MAX_LOG_LINES: usize = 10;
         self.log.push(format!("[LOG] {}", line.into()));
         if self.log.len() > MAX_LOG_LINES {
             self.log.drain(0..self.log.len() - MAX_LOG_LINES);
+            // Adjust scroll if necessary (as above)
+            let max_scroll = self.log.len().saturating_sub(1);
+            self.console_scroll = self.console_scroll.min(max_scroll);
         }
+        // Auto-scroll to the bottom respecting viewport height
+        let viewport = self.console_viewport_height.max(1);
+        let new_scroll_pos = self.log.len().saturating_sub(viewport);
+        self.console_scroll = new_scroll_pos;
     }
 
     // --- Input Handling Methods (adapted from input_example.rs) ---
@@ -113,7 +159,7 @@ impl App {
     }
 
     /// Resets the cursor position to the beginning of the input string.
-    fn reset_cursor(&mut self) {
+    pub fn reset_cursor(&mut self) {
         self.cursor_position = 0;
     }
 
@@ -172,57 +218,103 @@ impl App {
 /// Implements the rendering logic for the `App` state using Ratatui.
 impl Widget for &App {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        // --- Main Block ---
-        let title_bottom = match self.input_mode {
-            InputMode::Normal => " (Input: / | Quit: Ctrl+q) ".bold(),
-            InputMode::Editing => " (Exit Input: Esc | Submit: Enter) ".bold(),
-        };
-        let block = Block::bordered()
-            .title(" SwapBytes Console ".bold())
-            .title_bottom(Line::from(title_bottom))
-            .border_set(border::THICK);
+        // Style for focused vs unfocused panes
+        let focused_style = Style::default().fg(Color::Yellow);
+        let unfocused_style = Style::default();
 
-        // --- Layout within the main block ---
-        // Create a layout for the log panel and the input box
-        let inner_area = block.inner(area);
-        let chunks = Layout::vertical([
-            Constraint::Min(1), // Log panel takes remaining space
-            Constraint::Length(3), // Input box is 3 lines high
+        // --- Overall Layout (Left: Chat/Console, Right: Users) ---
+        let main_chunks = Layout::horizontal([
+            Constraint::Percentage(75), // Left side (Chat + Console)
+            Constraint::Percentage(25), // Right side (Users List)
         ])
-        .split(inner_area);
+        .split(area);
 
-        // Render the main block first to draw borders
-        block.render(area, buf);
+        let left_area = main_chunks[0];
+        let right_area = main_chunks[1];
 
-        // --- Log Panel ---
+        // --- Left Side Layout (Top: Chat, Bottom: Console) ---
+        let left_chunks = Layout::vertical([
+            Constraint::Percentage(67), // Top: Chat (approx 2/3)
+            Constraint::Percentage(33), // Bottom: Console (approx 1/3)
+        ])
+        .split(left_area);
+
+        let chat_area = left_chunks[0];
+        let console_area = left_chunks[1];
+
+        // --- Placeholder: Users List ---
+        let users_block = Block::bordered()
+            .title(" Users ".bold())
+            .border_set(border::THICK)
+            .border_style(if self.focused_pane == FocusPane::UsersList { focused_style } else { unfocused_style });
+        users_block.render(right_area, buf);
+        // TODO: Render actual user list inside users_block.inner(right_area)
+
+
+        // --- Placeholder: Chat ---
+        let chat_title = " Global Chat ".bold();
+        let chat_block = Block::bordered()
+            .title(chat_title)
+            .border_set(border::THICK)
+            .border_style(if self.focused_pane == FocusPane::Chat { focused_style } else { unfocused_style });
+        chat_block.render(chat_area, buf);
+        // TODO: Render chat messages inside chat_block.inner(chat_area)
+
+
+        // --- Console Panel (Adapted from previous main block) ---
+        let console_title_bottom = match self.input_mode {
+            InputMode::Normal => " Focus: Tab | Scroll: ↑/↓ | Quit: Ctrl+q ".bold(), // Updated hint
+            InputMode::Editing => " Submit: Enter | Cancel: Esc ".bold(),
+        };
+        let console_block = Block::bordered()
+            .title(" Console ".bold())
+            .title_bottom(Line::from(console_title_bottom))
+            .border_set(border::THICK)
+            .border_style(if self.focused_pane == FocusPane::Console { focused_style } else { unfocused_style });
+
+        // Layout within the console block (Log + Input)
+        let console_inner_area = console_block.inner(console_area);
+        let console_chunks = Layout::vertical([
+            Constraint::Min(1),
+            Constraint::Length(3),
+        ])
+        .split(console_inner_area);
+
+        let log_area = console_chunks[0];
+        let input_area = console_chunks[1];
+
+        // Render the console block border first
+        console_block.render(console_area, buf);
+
+        // Render Log Panel within its area
         let log_text = Text::from(
             self.log
                 .iter()
                 .map(|l| Line::from(l.clone()))
                 .collect::<Vec<_>>(),
         );
-        // We don't need a block around the log paragraph itself as it's inside the main block
-        Paragraph::new(log_text).render(chunks[0], buf);
+        let log_paragraph = Paragraph::new(log_text)
+            .scroll((self.console_scroll as u16, 0));
+        log_paragraph.render(log_area, buf);
 
-
-        // --- Input Box ---
+        // Render Input Box within its area
         let input_paragraph = Paragraph::new(self.input.as_str())
             .style(match self.input_mode {
                 InputMode::Normal => Style::default(),
                 InputMode::Editing => Style::default().fg(Color::Yellow),
             })
-            .block(Block::bordered().title(" Input "));
-        input_paragraph.render(chunks[1], buf);
+            .block(Block::bordered().title(" Input (/)"));
+        input_paragraph.render(input_area, buf);
 
 
         // --- Cursor ---
-        // Set cursor position only when in editing mode
+        // Set cursor position only when in editing mode and within the input area
         match self.input_mode {
             InputMode::Normal => {} // No cursor in normal mode
             #[allow(clippy::cast_possible_truncation)]
             InputMode::Editing => {
-                // Cursor position is set in the main loop (main.rs)
-                // where the Frame object is available.
+                // Make sure cursor isn't rendered outside the visible input box
+                // The actual cursor setting happens in main.rs using f.set_cursor()
             }
         }
     }

@@ -93,6 +93,8 @@ pub struct App {
     pub pinging: bool,
     /// Timestamp when the current ping command was initiated.
     pub ping_start_time: Option<Instant>,
+    /// Flag indicating if the user wants to be perceived as online.
+    pub is_visible: bool,
 }
 
 impl Default for App {
@@ -119,6 +121,7 @@ impl Default for App {
             peers: HashMap::new(), // Initialize empty peers map
             pinging: false, // Initialize pinging state
             ping_start_time: None, // Initialize ping start time
+            is_visible: true, // User is visible by default
         }
     }
 }
@@ -405,6 +408,8 @@ pub enum AppEvent {
     Quit,
     /// User nickname has been updated (sent from UI to Swarm task).
     NicknameUpdated(PeerId, String),
+    /// User visibility has changed (sent from UI to Swarm task).
+    VisibilityChanged(bool),
 }
 
 // Computes the layout rectangles for the chat, console, and users list.

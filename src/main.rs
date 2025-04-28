@@ -38,9 +38,9 @@ use behavior::{SwapBytesBehaviour, SwapBytesBehaviourEvent};
 /// Gossipsub topic for SwapBytes
 const SWAPBYTES_TOPIC: &str = "swapbytes-global-chat";
 /// Interval for sending heartbeats
-const HEARTBEAT_INTERVAL_SECS: u64 = 5;
+const HEARTBEAT_INTERVAL_SECS: u64 = 2;
 /// Timeout duration for marking peers offline
-const PEER_TIMEOUT_SECS: u64 = 17;
+const PEER_TIMEOUT_SECS: u64 = 8;
 
 // --- Define Message Types ---
 #[derive(Serialize, Deserialize, Debug)]
@@ -105,11 +105,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let swarm_cancel = cancel.clone();
     // Capture initial nickname for the swarm task
     let initial_nickname = app.nickname.clone();
+    // Capture initial visibility state
+    let initial_visibility = app.is_visible;
     tokio::spawn(async move {
         // Swarm task owns swarm and swarm_tx
         let mut swarm = swarm;
         // Store the current nickname locally within the swarm task
         let mut current_nickname = initial_nickname;
+        // Store the current visibility state locally within the swarm task
+        let mut is_visible = initial_visibility;
         // Heartbeat interval timer
         let mut heartbeat_timer = interval(Duration::from_secs(HEARTBEAT_INTERVAL_SECS));
         // Define the topic here once
@@ -121,32 +125,37 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
                 // --- Heartbeat Broadcaster ---
                 _ = heartbeat_timer.tick() => {
-                    // Get current timestamp in milliseconds
-                    let timestamp_ms = SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .expect("Time went backwards")
-                        .as_millis() as u64; // Use u64
+                    // Only send heartbeat if visible
+                    if is_visible {
+                        // Log
+                        // let _ = swarm_tx.send(AppEvent::LogMessage(format!("Sending heartbeat.")));
+                        // Get current timestamp in milliseconds
+                        let timestamp_ms = SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .expect("Time went backwards")
+                            .as_millis() as u64; // Use u64
 
-                    let heartbeat_msg = Message::Heartbeat {
-                        timestamp_ms,
-                        nickname: current_nickname.clone(), // Use the task's nickname
-                    };
+                        let heartbeat_msg = Message::Heartbeat {
+                            timestamp_ms,
+                            nickname: current_nickname.clone(), // Use the task's nickname
+                        };
 
-                    match serde_json::to_vec(&heartbeat_msg) {
-                        Ok(encoded_msg) => {
-                            if let Err(e) = swarm.behaviour_mut().gossipsub.publish(topic.clone(), encoded_msg) {
-                                // Ignore these errors: "Failed to publish heartbeat: InsufficientPeers"
-                                if e.to_string() != "InsufficientPeers" {
-                                    // Log error, but don't crash the task
-                                    let _ = swarm_tx.send(AppEvent::LogMessage(format!("Failed to publish heartbeat: {e}")));
+                        match serde_json::to_vec(&heartbeat_msg) {
+                            Ok(encoded_msg) => {
+                                if let Err(e) = swarm.behaviour_mut().gossipsub.publish(topic.clone(), encoded_msg) {
+                                    // Ignore these errors: "Failed to publish heartbeat: InsufficientPeers"
+                                    if e.to_string() != "InsufficientPeers" {
+                                        // Log error, but don't crash the task
+                                        let _ = swarm_tx.send(AppEvent::LogMessage(format!("Failed to publish heartbeat: {e}")));
+                                    }
                                 }
                             }
+                            Err(e) => {
+                                 // Log serialization error
+                                 let _ = swarm_tx.send(AppEvent::LogMessage(format!("Failed to serialize heartbeat: {e}")));
+                            }
                         }
-                        Err(e) => {
-                             // Log serialization error
-                             let _ = swarm_tx.send(AppEvent::LogMessage(format!("Failed to serialize heartbeat: {e}")));
-                        }
-                    }
+                    } // else: do nothing if not visible
                 }
 
                 // Handle commands from the UI (e.g., Dial)
@@ -164,6 +173,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         AppEvent::NicknameUpdated(_peer_id, nickname) => {
                             // Update the nickname stored within the swarm task
                             current_nickname = Some(nickname);
+                        }
+                        // Handle visibility changes from the UI/commands
+                        AppEvent::VisibilityChanged(new_visibility) => {
+                            is_visible = new_visibility;
                         }
                         // Ignore other commands if any were sent here by mistake
                         _ => {}
@@ -493,6 +506,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                                         AppEvent::NicknameUpdated(peer_id, nickname) => {
                                                             let _ = cmd_tx.send(AppEvent::NicknameUpdated(peer_id, nickname));
                                                         }
+                                                        // Send VisibilityChanged event to the swarm task
+                                                        AppEvent::VisibilityChanged(is_visible) => {
+                                                            app.push(format!("Command sent visibility change: {}", is_visible));
+                                                            let _ = cmd_tx.send(AppEvent::VisibilityChanged(is_visible));
+                                                        }
                                                         // Ignore any other event types for now
                                                         _ => {}
                                                     }
@@ -567,6 +585,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         }
                         AppEvent::Dial(_) => {} // Handled by swarm task
                         AppEvent::Quit => {} // Already handled in Editing mode Enter
+                        AppEvent::VisibilityChanged(_) => {} // Handled by swarm task
                     }
                 } else {
                     // Channel closed, exit

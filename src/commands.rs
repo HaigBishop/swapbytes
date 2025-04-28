@@ -63,6 +63,8 @@ pub fn process_command(command_input: &str, app: &mut App) -> Option<AppEvent> {
                 Some(name) => app.push(format!("Nickname: {}", name)),
                 None => app.push("Nickname: (Not set - use /setname)".to_string()),
             }
+            // Show visibility status
+            app.push(format!("Visibility: {}", if app.is_visible { "Online" } else { "Hidden" }));
         }
         "setdir" => {
             if args.is_empty() {
@@ -99,6 +101,24 @@ pub fn process_command(command_input: &str, app: &mut App) -> Option<AppEvent> {
                 }
             }
         }
+        "hide" => {
+            if app.is_visible {
+                app.is_visible = false;
+                app.push("You are now hidden. Use /show to become visible again.".to_string());
+                event_to_send = Some(AppEvent::VisibilityChanged(false));
+            } else {
+                app.push("You are already hidden.".to_string());
+            }
+        }
+        "show" => {
+            if !app.is_visible {
+                app.is_visible = true;
+                app.push("You are now visible.".to_string());
+                event_to_send = Some(AppEvent::VisibilityChanged(true));
+            } else {
+                app.push("You are already visible.".to_string());
+            }
+        }
         "quit" | "q" => {
             event_to_send = Some(AppEvent::Quit);
         }
@@ -108,6 +128,8 @@ pub fn process_command(command_input: &str, app: &mut App) -> Option<AppEvent> {
             app.push("  /setdir <path>    - Set the absolute path for downloads.".to_string());
             app.push("  /setname <name>   - Set your nickname (3-16 chars, a-z, A-Z, 0-9, -, _).".to_string());
             app.push("  /ping <multiaddr> - Ping a peer.".to_string());
+            app.push("  /hide             - Set your status to appear offline.".to_string());
+            app.push("  /show             - Set your status to appear online.".to_string());
             app.push("  /quit             - Exit SwapBytes.".to_string());
             // Add other commands here as needed
             app.push("  /help             - Show this help message.".to_string());

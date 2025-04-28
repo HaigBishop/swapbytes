@@ -8,18 +8,24 @@ use ratatui::{
     layout::Rect,
     style::Stylize,
     symbols::border,
-    text::{Line, Text},
-    widgets::{Block, Paragraph, Widget},
+    text::{Line, Text, Span},
+    widgets::{Block, Paragraph, Widget, List, ListItem},
     layout::{Constraint, Layout},
     style::{Color, Style},
 };
 use crossterm::event;
 use std::path::PathBuf;
+use std::collections::HashMap;
+use std::time::Instant;
+use std::time::Duration;
 
 // libp2p imports
 use libp2p::swarm::SwarmEvent;
-use libp2p::Multiaddr;
+use libp2p::{Multiaddr, PeerId};
 use crate::behavior::SwapBytesBehaviourEvent;
+
+/// Time to wait before resetting the pinging state indicator.
+pub const PINGING_DURATION: Duration = Duration::from_millis(2000);
 
 /// Input modes for the TUI.
 #[derive(Debug, Default)]
@@ -36,6 +42,21 @@ pub enum FocusPane {
     Console,
     Chat,
     UsersList,
+}
+
+/// Represents the online status of a peer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OnlineStatus {
+    Online,
+    Offline,
+}
+
+/// Holds information about a discovered peer.
+#[derive(Debug, Clone)]
+pub struct PeerInfo {
+    pub nickname: Option<String>,
+    pub status: OnlineStatus,
+    pub last_seen: Instant,
 }
 
 /// Application state for the TUI.
@@ -63,6 +84,14 @@ pub struct App {
     pub download_dir: Option<PathBuf>,
     /// User's chosen nickname (must be verified).
     pub nickname: Option<String>,
+    /// The local peer's unique ID.
+    pub local_peer_id: Option<PeerId>,
+    /// Map of discovered peers and their info.
+    pub peers: HashMap<PeerId, PeerInfo>,
+    /// Flag indicating if a ping command is currently active.
+    pub pinging: bool,
+    /// Timestamp when the current ping command was initiated.
+    pub ping_start_time: Option<Instant>,
 }
 
 impl Default for App {
@@ -79,6 +108,10 @@ impl Default for App {
             listening_addresses: Vec::new(), // Initialize empty list
             download_dir: None, // Initialize as None
             nickname: None, // Initialize nickname as None
+            local_peer_id: None, // Initialize PeerId as None
+            peers: HashMap::new(), // Initialize empty peers map
+            pinging: false, // Initialize pinging state
+            ping_start_time: None, // Initialize ping start time
         }
     }
 }
@@ -237,12 +270,17 @@ impl App {
         log_paragraph.render(log_area, buf);
 
         // Render Input Box within its area
+        let input_title = if self.pinging {
+            " Input (Pinging...) " // Indicate pinging state
+        } else {
+            " Input (/) " // Normal state
+        };
         let input_paragraph = Paragraph::new(self.input.as_str())
             .style(match self.input_mode {
                 InputMode::Normal => Style::default(),
                 InputMode::Editing => Style::default().fg(Color::Yellow),
             })
-            .block(Block::bordered().title(" Input (/)"));
+            .block(Block::bordered().title(input_title.bold())); // Use dynamic title
         input_paragraph.render(input_area, buf);
     }
 
@@ -250,18 +288,59 @@ impl App {
     fn render_users_pane(&self, area: Rect, buf: &mut Buffer) {
         let focused_style = Style::default().fg(Color::Yellow);
         let unfocused_style = Style::default();
+        let is_focused = self.focused_pane == FocusPane::UsersList;
 
         let users_block = Block::bordered()
             .title(" Users ".bold())
             .border_set(border::THICK)
-            .border_style(if self.focused_pane == FocusPane::UsersList { focused_style } else { unfocused_style });
+            .border_style(if is_focused { focused_style } else { unfocused_style });
 
         let inner_area = users_block.inner(area);
-        users_block.render(area, buf);
+        users_block.render(area, buf); // Render block border first
 
-        // TODO: Render actual user list inside inner_area
-        let placeholder_text = Paragraph::new("User list coming soon...");
-        placeholder_text.render(inner_area, buf);
+        // --- Render actual user list inside inner_area ---
+        let mut items = Vec::new();
+        // Sort peers by PeerId (base58 representation) for a consistent order.
+        let mut sorted_peers: Vec<_> = self.peers.iter().collect();
+        sorted_peers.sort_by_key(|(id, _)| id.to_base58());
+
+        for (peer_id, peer_info) in sorted_peers {
+            // Determine the display name: Use the nickname if available,
+            // otherwise show "No-Name" followed by the last 6 chars of the PeerId.
+            // Nicknames will be populated later via Gossipsub messages.
+            let display_name = peer_info.nickname.clone().unwrap_or_else(|| {
+                let id_str = peer_id.to_base58();
+                let len = id_str.len();
+                // Ensure we don't panic if the id_str is unexpectedly short
+                let start_index = len.saturating_sub(6); // Get index 6 chars from the end, or 0 if too short
+                format!("No-Name (...{})", &id_str[start_index..])
+            });
+
+            // Style the status prefix based on whether the peer is Online or Offline.
+            let status_style = match peer_info.status {
+                OnlineStatus::Online => Style::default().fg(Color::Green),
+                OnlineStatus::Offline => Style::default().fg(Color::Gray),
+            };
+
+            // Define the status prefix string.
+            let prefix = match peer_info.status {
+                OnlineStatus::Online => "[✓] ",
+                OnlineStatus::Offline => "[✗] ",
+            };
+            // Construct the line with styled prefix and raw display name using Spans
+            // for explicit control over styling.
+            let line = Line::from(vec![
+                Span::styled(prefix, status_style), // Use Span::styled
+                Span::raw(display_name),       // Use Span::raw for the string part
+            ]);
+            items.push(ListItem::new(line));
+        }
+
+        // Create the list widget with the generated items.
+        // TODO: Implement scroll state handling if the list becomes long.
+        let users_list = List::new(items);
+        // Render the list within the inner area
+        users_list.render(inner_area, buf);
     }
 
     /// Renders the chat pane.
@@ -310,6 +389,10 @@ pub enum AppEvent {
     Dial(Multiaddr),
     /// Message to be logged in the UI (sent from Swarm task to UI).
     LogMessage(String),
+    /// A peer was discovered via mDNS.
+    PeerDiscovered(PeerId),
+    /// An mDNS record for a peer expired.
+    PeerExpired(PeerId),
     /// User command to quit the application.
     Quit,
 }

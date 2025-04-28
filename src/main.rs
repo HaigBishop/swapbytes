@@ -4,15 +4,16 @@ The main file for the SwapBytes CLI file-sharing application.
 
 
 // Standard library imports
-use std::{error::Error, time::Duration};
+use std::{error::Error, time::Duration, time::Instant, time::SystemTime, time::UNIX_EPOCH};
 
 // Async imports
 use futures::prelude::*;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
+use tokio::time::interval; // Import interval
 
 // libp2p imports
-use libp2p::{noise, ping, swarm::SwarmEvent, tcp, yamux};
+use libp2p::{noise, ping, swarm::SwarmEvent, tcp, yamux, identity, PeerId, gossipsub, mdns};
 
 // Terminal UI imports
 use crossterm::event;
@@ -23,13 +24,31 @@ use ratatui::{
     widgets::Block,
 };
 
+// Serialization for messages
+use serde::{Serialize, Deserialize}; // Import Serialize/Deserialize
+
 // Local modules
 mod tui;
 mod utils;
 mod commands;
 mod behavior;
-use tui::{App, AppEvent, InputMode, FocusPane, layout_chunks};
+use tui::{App, AppEvent, InputMode, FocusPane, layout_chunks, PeerInfo, OnlineStatus}; // Add PeerInfo/OnlineStatus
 use behavior::{SwapBytesBehaviour, SwapBytesBehaviourEvent};
+
+/// Gossipsub topic for SwapBytes
+const SWAPBYTES_TOPIC: &str = "swapbytes-global-chat";
+/// Interval for sending heartbeats
+const HEARTBEAT_INTERVAL_SECS: u64 = 5;
+/// Timeout duration for marking peers offline
+const PEER_TIMEOUT_SECS: u64 = 10;
+
+// --- Define Message Types ---
+#[derive(Serialize, Deserialize, Debug)]
+#[serde(tag = "type")] // Use a 'type' field to distinguish message types
+enum Message {
+    Heartbeat { timestamp_ms: u64 }, // Add timestamp field
+    // Add other message types like Chat, NicknameUpdate later
+}
 
 /// Entry point: sets up TUI, libp2p, and event loop.
 #[tokio::main]
@@ -38,6 +57,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // --- Terminal UI setup ---
     let mut terminal = ratatui::init();
 
+
+    // --- Generate Identity ---
+    let local_key = identity::Keypair::generate_ed25519();
+    let local_peer_id = PeerId::from(local_key.public());
+    println!("Local Peer ID: {}", local_peer_id);
 
     // --- Event channel and cancellation token ---
     // Used to communicate between background tasks and the UI loop.
@@ -49,17 +73,22 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
 
     // --- libp2p Swarm setup ---
-    // 1. Generate a new identity.
-    // 2. Use TCP transport, Noise encryption, Yamux multiplexing.
-    // 3. Add ping behaviour.
-    let mut swarm = libp2p::SwarmBuilder::with_new_identity()
+    // 1. Create our custom behaviour with the generated key.
+    let mut behaviour = SwapBytesBehaviour::new(&local_key)?;
+
+    // 2. Define the gossipsub topic and subscribe.
+    let topic = gossipsub::IdentTopic::new(SWAPBYTES_TOPIC);
+    behaviour.gossipsub.subscribe(&topic)?;
+
+    // 3. Build the Swarm using the existing identity and the behaviour.
+    let mut swarm = libp2p::SwarmBuilder::with_existing_identity(local_key)
         .with_tokio()
         .with_tcp(
             tcp::Config::default(),
             noise::Config::new,
             yamux::Config::default,
         )?
-        .with_behaviour(|_| SwapBytesBehaviour::default())?
+        .with_behaviour(|_| behaviour)? // Pass the constructed behaviour
         .build();
 
     // Listen on all interfaces, random OS-assigned port.
@@ -72,10 +101,42 @@ async fn main() -> Result<(), Box<dyn Error>> {
     tokio::spawn(async move {
         // Swarm task owns swarm and swarm_tx
         let mut swarm = swarm;
+        // Heartbeat interval timer
+        let mut heartbeat_timer = interval(Duration::from_secs(HEARTBEAT_INTERVAL_SECS));
+        // Define the topic here once
+        let topic = gossipsub::IdentTopic::new(SWAPBYTES_TOPIC);
+
         loop {
             tokio::select! {
                 _ = swarm_cancel.cancelled() => break, // Graceful shutdown
-                
+
+                // --- Heartbeat Broadcaster ---
+                _ = heartbeat_timer.tick() => {
+                    // Get current timestamp in milliseconds
+                    let timestamp_ms = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .expect("Time went backwards")
+                        .as_millis() as u64; // Use u64
+
+                    let heartbeat_msg = Message::Heartbeat { timestamp_ms };
+
+                    match serde_json::to_vec(&heartbeat_msg) {
+                        Ok(encoded_msg) => {
+                            if let Err(e) = swarm.behaviour_mut().gossipsub.publish(topic.clone(), encoded_msg) {
+                                // Ignore these errors: "Failed to publish heartbeat: InsufficientPeers"
+                                if e.to_string() != "InsufficientPeers" {
+                                    // Log error, but don't crash the task
+                                    let _ = swarm_tx.send(AppEvent::LogMessage(format!("Failed to publish heartbeat: {e}")));
+                                }
+                            }
+                        }
+                        Err(e) => {
+                             // Log serialization error
+                             let _ = swarm_tx.send(AppEvent::LogMessage(format!("Failed to serialize heartbeat: {e}")));
+                        }
+                    }
+                }
+
                 // Handle commands from the UI (e.g., Dial)
                 Some(cmd) = cmd_rx.recv() => {
                     match cmd {
@@ -92,13 +153,39 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     }
                 }
 
-                // Forward swarm events to the UI
+                // Handle Swarm events
                 ev = swarm.next() => {
-                    if let Some(ev) = ev {
-                        // Use swarm_tx to send Swarm events
-                        let _ = swarm_tx.send(AppEvent::Swarm(ev));
+                    if let Some(event) = ev {
+                        match event {
+                            SwarmEvent::Behaviour(SwapBytesBehaviourEvent::Mdns(mdns::Event::Discovered(list))) => {
+                                for (peer_id, _multiaddr) in list {
+                                    // Log mDNS discovery (optional)
+                                    // let _ = swarm_tx.send(AppEvent::LogMessage(format!("mDNS Discovered: {peer_id}")));
+                                    // Add the newly discovered peer to Gossipsub's routing table
+                                    swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
+                                    // Send event to UI task
+                                    let _ = swarm_tx.send(AppEvent::PeerDiscovered(peer_id));
+                                }
+                            }
+                            SwarmEvent::Behaviour(SwapBytesBehaviourEvent::Mdns(mdns::Event::Expired(list))) => {
+                                for (peer_id, _multiaddr) in list {
+                                    // Log mDNS expiry (optional)
+                                    // let _ = swarm_tx.send(AppEvent::LogMessage(format!("mDNS Expired: {peer_id}")));
+                                    // Remove the peer from Gossipsub's routing table
+                                    swarm.behaviour_mut().gossipsub.remove_explicit_peer(&peer_id);
+                                    // Send event to UI task
+                                    // We now rely on heartbeat timeout, so PeerExpired from mDNS is less critical
+                                    // We could still send it, but let's comment it out to rely purely on heartbeat for status
+                                    // let _ = swarm_tx.send(AppEvent::PeerExpired(peer_id));
+                                }
+                            }
+                            // Forward other events (including Gossipsub messages, Ping, etc.) to the UI task
+                            other_event => {
+                                let _ = swarm_tx.send(AppEvent::Swarm(other_event));
+                            }
+                        }
                     } else {
-                        break;
+                        break; // Swarm stream ended
                     }
                 }
             }
@@ -127,15 +214,37 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     // --- Application state and main event loop ---
     let mut app = App::default();
+    app.local_peer_id = Some(local_peer_id);
     app.push("Welcome to SwapBytes!".to_string());
     app.push("Run /help to get started.".to_string());
     let mut redraw = true; // Force initial draw
 
+    // Timer for checking peer staleness in the UI task
+    let mut check_peers_interval = interval(Duration::from_secs(5)); // Check every 5s
+
     loop {
+        // --- Check Ping Timeout ---
+        // Must be done *before* drawing or selecting
+        if app.pinging {
+            if let Some(start_time) = app.ping_start_time {
+                // Use the constant from the tui module
+                if start_time.elapsed() > tui::PINGING_DURATION {
+                    app.pinging = false;
+                    app.ping_start_time = None;
+                    // Don't log timeout here, let ping result handle success/failure message
+                    redraw = true; // Need redraw to update input title
+                }
+            } else {
+                // Should not happen if pinging is true, reset defensively
+                app.pinging = false;
+                redraw = true;
+            }
+        }
+
         // Redraw UI only if something changed
         if redraw {
             terminal.draw(|f| {
-                // --- Draw main application widget --- 
+                // --- Draw main application widget ---
                 // We draw the app first using its Widget impl
                 // This draws everything EXCEPT the stateful scrollbar
                 f.render_widget(&app, f.area());
@@ -161,7 +270,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     InputMode::Normal => {} // Cursor hidden by default
                     InputMode::Editing => {
                         // Input area calculation (already done above for scrollbar)
-                        let input_area = console_chunks[1]; 
+                        let input_area = console_chunks[1];
                         f.set_cursor_position(Position::new(
                             input_area.x + app.cursor_position as u16 + 1,
                             input_area.y + 1,
@@ -172,144 +281,254 @@ async fn main() -> Result<(), Box<dyn Error>> {
             redraw = false;
         }
 
-        // Wait for next event (from swarm or keyboard)
-        if let Some(ev) = rx.recv().await {
-            match ev {
-                AppEvent::Swarm(se) => {
-                    match &se {
-                        SwarmEvent::NewListenAddr { address, .. } => {
-                            // Store the address
-                            app.listening_addresses.push(address.clone());
-                            // Print the address to the console
-                            // app.push(format!("Listening on {address}"));
-                        }
-                        SwarmEvent::Behaviour(
-                            SwapBytesBehaviourEvent::Ping(ping::Event { peer, result, .. })
-                        ) => {
-                            match result {
-                                Ok(latency) => {
-                                    app.push(format!("Successfully pinged peer: {peer} ({latency:?})"));
+        // --- Event Handling --- 
+        tokio::select! {
+            // Handle events from Swarm or Keyboard tasks
+            maybe_ev = rx.recv() => {
+                if let Some(ev) = maybe_ev {
+                    match ev {
+                        AppEvent::Swarm(se) => {
+                            // Only handle events forwarded from the swarm task here
+                            match se { // No need for `&se` anymore as we own it
+                                SwarmEvent::NewListenAddr { address, .. } => {
+                                    // Store the address
+                                    app.listening_addresses.push(address.clone());
+                                    // app.push(format!("Listening on {address}"));
                                 }
-                                Err(e) => {
-                                    // Log ping errors as well
-                                    app.push(format!("Ping failed for peer: {peer} ({e:?})"));
-                                }
-                            }
-                        }
-                        SwarmEvent::OutgoingConnectionError { error, .. } => {
-                            app.push(format!("Outgoing connection error: {error}"));
-                        }
-                        _ => {
-                            // Log other swarm events if needed
-                        }
-                    }
-                    redraw = true;
-                }
-                AppEvent::Input(key) => {
-                    // Always handle Ctrl+q first
-                    if key.kind == KeyEventKind::Press
-                        && key.code == KeyCode::Char('q')
-                        && key.modifiers.contains(event::KeyModifiers::CONTROL)
-                    {
-                        cancel.cancel();
-                        app.exit = true;
-                        continue;
-                    }
-
-                    match app.input_mode {
-                        InputMode::Normal => {
-                            if key.kind == KeyEventKind::Press {
-                                match key.code {
-                                    // Focus Switching
-                                    KeyCode::Tab => {
-                                        app.focused_pane = match app.focused_pane {
-                                            FocusPane::Chat => FocusPane::Console,
-                                            FocusPane::Console => FocusPane::UsersList,
-                                            FocusPane::UsersList => FocusPane::Chat,
-                                        };
-                                        redraw = true;
-                                    }
-                                    // Enter Editing Mode
-                                    KeyCode::Char('/') => {
-                                        app.input_mode = InputMode::Editing;
-                                        app.input.clear();
-                                        app.input.push('/');
-                                        app.cursor_position = 1;
-                                        redraw = true;
-                                    }
-                                    // Scrolling (only if Console focused)
-                                    KeyCode::Up if app.focused_pane == FocusPane::Console => {
-                                        app.console_scroll = app.console_scroll.saturating_sub(1);
-                                        redraw = true;
-                                    }
-                                    KeyCode::Down if app.focused_pane == FocusPane::Console => {
-                                        let max_scroll = app.log.len().saturating_sub(app.console_viewport_height);
-                                        app.console_scroll = app.console_scroll.saturating_add(1).min(max_scroll);
-                                        redraw = true;
-                                    }
-                                    _ => {} // Ignore other keys in normal mode
-                                }
-                            }
-                        }
-                        InputMode::Editing => {
-                            if key.kind == KeyEventKind::Press {
-                                match key.code {
-                                    KeyCode::Enter => {
-                                        // submit_command now returns an optional event
-                                        if let Some(event) = app.submit_command() {
-                                            match event {
-                                                AppEvent::Quit => {
-                                                    // Handle Quit directly here
-                                                    cancel.cancel();
-                                                    app.exit = true;
-                                                }
-                                                // Send other commands (like Dial) to the swarm task
-                                                AppEvent::Dial(addr) => {
-                                                    let _ = cmd_tx.send(AppEvent::Dial(addr));
-                                                }
-                                                // Ignore any other event types returned by submit_command
-                                                _ => {}
+                                SwarmEvent::Behaviour(
+                                    SwapBytesBehaviourEvent::Ping(ping::Event { peer, result, .. })
+                                ) => {
+                                    match result {
+                                        Ok(latency) => {
+                                            // Only log if we initiated the ping
+                                            if app.pinging {
+                                                app.push(format!("Successfully pinged peer: {peer} ({latency:?})"));
+                                                // No need to reset pinging here, the timer handles it
                                             }
                                         }
-                                        // Redraw only if we didn't just handle Quit
-                                        if !app.exit {
-                                            redraw = true;
+                                        Err(e) => {
+                                            // Only log if we initiated the ping
+                                            if app.pinging {
+                                                app.push(format!("Ping failed for peer: {peer} ({e:?})"));
+                                                // No need to reset pinging here, the timer handles it
+                                            }
                                         }
                                     }
-                                    KeyCode::Char(to_insert) => {
-                                        app.enter_char(to_insert);
-                                        redraw = true;
+                                    // Ping activity (even incoming pings, or failed outgoing ones)
+                                    // should still update the peer's last seen time.
+                                    if let Some(peer_info) = app.peers.get_mut(&peer) {
+                                        peer_info.last_seen = Instant::now();
+                                        peer_info.status = OnlineStatus::Online; // Mark online on successful ping
                                     }
-                                    KeyCode::Backspace => {
-                                        app.delete_char();
-                                        redraw = true;
+                                }
+                                // Mdns events are handled in the swarm task now
+                                // SwarmEvent::Behaviour(SwapBytesBehaviourEvent::Mdns(...)) => { ... }
+
+                                SwarmEvent::Behaviour(
+                                    SwapBytesBehaviourEvent::Gossipsub(gossipsub::Event::Message {
+                                        propagation_source: peer_id,
+                                        message_id: id,
+                                        message,
+                                    })
+                                ) => {
+                                    // Log raw message for now (can be removed later)
+                                    // app.push(format!(
+                                    //     "Gossipsub Message: '{}' (ID: {id}) from {peer_id}",
+                                    //     String::from_utf8_lossy(&message.data),
+                                    // ));
+
+                                    // Avoud unused warning
+                                    let _ = id;
+                                    let _ = message;
+
+                                    // --- Update peer status on any message ---
+                                    let now = Instant::now();
+                                    let peer_info = app.peers.entry(peer_id).or_insert_with(|| {
+                                        // Insert if new
+                                        PeerInfo {
+                                            nickname: None, // Nickname unknown until exchanged
+                                            status: OnlineStatus::Online,
+                                            last_seen: now,
+                                        }
+                                    });
+                                    // Modify the entry (whether newly inserted or existing)
+                                    peer_info.last_seen = now;
+                                    peer_info.status = OnlineStatus::Online;
+
+                                    // TODO: Deserialize and process message content (Heartbeat, Chat, etc.)
+                                    // match serde_json::from_slice::<Message>(&message.data) { ... }
+
+                                }
+                                SwarmEvent::OutgoingConnectionError { error, .. } => {
+                                    // This logging is commented out to hide a harmless "Failed to negotiate transport protocol(s)" error
+                                    // Connection eventually succeeds via the LAN address, so the error can be safely ignored.
+                                    // This only happens during same-machine mDNS testing, therefore is not a real issue.
+                                    // app.push(format!("Outgoing connection error: {error}"));
+
+                                    // do something with the error to avoid unused warning
+                                    let _ = error;
+
+                                }
+                                // Add other SwarmEvent variants as needed
+                                _ => {
+                                    // app.push(format!("Unhandled Swarm Event: {:?}", se));
+                                }
+                            }
+                            redraw = true; // Redraw after any swarm event
+                        }
+                        AppEvent::Input(key) => {
+                            // Always handle Ctrl+q first
+                            if key.kind == KeyEventKind::Press
+                                && key.code == KeyCode::Char('q')
+                                && key.modifiers.contains(event::KeyModifiers::CONTROL)
+                            {
+                                cancel.cancel();
+                                app.exit = true;
+                                continue; // Skip further processing for this event
+                            }
+
+                            // Handle based on input mode
+                            match app.input_mode {
+                                InputMode::Normal => {
+                                    if key.kind == KeyEventKind::Press {
+                                        match key.code {
+                                            // Focus Switching
+                                            KeyCode::Tab => {
+                                                app.focused_pane = match app.focused_pane {
+                                                    FocusPane::Chat => FocusPane::Console,
+                                                    FocusPane::Console => FocusPane::UsersList,
+                                                    FocusPane::UsersList => FocusPane::Chat,
+                                                };
+                                                redraw = true;
+                                            }
+                                            // Enter Editing Mode
+                                            KeyCode::Char('/') => {
+                                                app.input_mode = InputMode::Editing;
+                                                app.input.clear();
+                                                app.input.push('/');
+                                                app.cursor_position = 1;
+                                                redraw = true;
+                                            }
+                                            // Scrolling (only if Console focused)
+                                            KeyCode::Up if app.focused_pane == FocusPane::Console => {
+                                                app.console_scroll = app.console_scroll.saturating_sub(1);
+                                                redraw = true;
+                                            }
+                                            KeyCode::Down if app.focused_pane == FocusPane::Console => {
+                                                let max_scroll = app.log.len().saturating_sub(app.console_viewport_height);
+                                                app.console_scroll = app.console_scroll.saturating_add(1).min(max_scroll);
+                                                redraw = true;
+                                            }
+                                            _ => {} // Ignore other keys in normal mode
+                                        }
                                     }
-                                    KeyCode::Left => {
-                                        app.move_cursor_left();
-                                        redraw = true;
+                                }
+                                InputMode::Editing => {
+                                    if key.kind == KeyEventKind::Press {
+                                        match key.code {
+                                            KeyCode::Enter => {
+                                                // submit_command now returns an optional event
+                                                if let Some(event) = app.submit_command() {
+                                                    match event {
+                                                        AppEvent::Quit => {
+                                                            // Handle Quit directly here
+                                                            cancel.cancel();
+                                                            app.exit = true;
+                                                        }
+                                                        // Send other commands (like Dial) to the swarm task
+                                                        AppEvent::Dial(addr) => {
+                                                            let _ = cmd_tx.send(AppEvent::Dial(addr));
+                                                        }
+                                                        // Ignore any other event types returned by submit_command
+                                                        _ => {}
+                                                    }
+                                                }
+                                                // Redraw only if we didn't just handle Quit
+                                                if !app.exit {
+                                                    redraw = true;
+                                                }
+                                            }
+                                            KeyCode::Char(to_insert) => {
+                                                app.enter_char(to_insert);
+                                                redraw = true;
+                                            }
+                                            KeyCode::Backspace => {
+                                                app.delete_char();
+                                                redraw = true;
+                                            }
+                                            KeyCode::Left => {
+                                                app.move_cursor_left();
+                                                redraw = true;
+                                            }
+                                            KeyCode::Right => {
+                                                app.move_cursor_right();
+                                                redraw = true;
+                                            }
+                                            KeyCode::Esc => {
+                                                app.input_mode = InputMode::Normal;
+                                                app.input.clear();
+                                                app.reset_cursor();
+                                                redraw = true;
+                                            }
+                                            _ => {} // Ignore other keys in editing mode
+                                        }
                                     }
-                                    KeyCode::Right => {
-                                        app.move_cursor_right();
-                                        redraw = true;
-                                    }
-                                    KeyCode::Esc => {
-                                        app.input_mode = InputMode::Normal;
-                                        app.input.clear();
-                                        app.reset_cursor();
-                                        redraw = true;
-                                    }
-                                    _ => {} // Ignore other keys in editing mode
                                 }
                             }
                         }
+                        AppEvent::LogMessage(msg) => {
+                            app.push(msg);
+                            redraw = true;
+                        }
+                        AppEvent::PeerDiscovered(peer_id) => {
+                            if peer_id != app.local_peer_id.expect("Local peer ID should be set") { // Don't add self
+                                let now = Instant::now();
+                                let peer_info = app.peers.entry(peer_id).or_insert_with(|| PeerInfo {
+                                    nickname: None, // Nickname unknown initially
+                                    status: OnlineStatus::Online,
+                                    last_seen: now, // Set last_seen on discovery
+                                });
+                                // Modify the entry (whether newly inserted or existing)
+                                peer_info.last_seen = now;
+                                peer_info.status = OnlineStatus::Online;
+                                redraw = true;
+                            }
+                        }
+                        AppEvent::PeerExpired(peer_id) => {
+                            // We no longer rely on mDNS expiry for primary status
+                            // If we kept this, we would mark offline here, but heartbeat check is better
+                            // if let Some(peer_info) = app.peers.get_mut(&peer_id) {
+                            //     peer_info.status = OnlineStatus::Offline;
+                            // }
+                            // app.push(format!("mDNS Expired (ignored for status): {peer_id}"));
+                            let _ = peer_id; // Avoid unused variable warning
+                            // redraw = true; // Don't redraw if we ignore it
+                        }
+                        AppEvent::Dial(_) => {} // Handled by swarm task
+                        AppEvent::Quit => {} // Already handled in Editing mode Enter
+                    }
+                } else {
+                    // Channel closed, exit
+                    app.exit = true;
+                }
+            },
+
+            // --- Check for Stale Peers ---
+            _ = check_peers_interval.tick() => {
+                let mut changed = false;
+                let now = Instant::now();
+                let timeout = Duration::from_secs(PEER_TIMEOUT_SECS);
+
+                for peer_info in app.peers.values_mut() {
+                    if peer_info.status == OnlineStatus::Online && now.duration_since(peer_info.last_seen) > timeout {
+                        peer_info.status = OnlineStatus::Offline;
+                        changed = true;
                     }
                 }
-                AppEvent::LogMessage(msg) => {
-                    app.push(msg);
+
+                if changed {
                     redraw = true;
                 }
-                AppEvent::Dial(_) => {}
-                AppEvent::Quit => {} // Already handled in Editing mode Enter
             }
         }
 

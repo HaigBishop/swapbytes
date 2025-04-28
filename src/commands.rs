@@ -1,5 +1,6 @@
 use crate::tui::{App, AppEvent};
 use libp2p::Multiaddr;
+use std::time::Instant;
 
 /// Processes a user command input.
 ///
@@ -22,6 +23,9 @@ pub fn process_command(command_input: &str, app: &mut App) -> Option<AppEvent> {
             } else {
                 match args.parse::<Multiaddr>() {
                     Ok(addr) => {
+                        app.pinging = true;
+                        app.ping_start_time = Some(Instant::now());
+                        app.push(format!("Attempting ping to: {}", args));
                         event_to_send = Some(AppEvent::Dial(addr));
                     }
                     Err(e) => {
@@ -43,6 +47,11 @@ pub fn process_command(command_input: &str, app: &mut App) -> Option<AppEvent> {
                 for addr_str in addrs_to_print {
                     app.push(addr_str);
                 }
+            }
+            // Show Peer ID
+            match &app.local_peer_id {
+                Some(id) => app.push(format!("Peer ID: {}", id)),
+                None => app.push("Peer ID: (Unknown - this shouldn't happen)".to_string()),
             }
              // Show download directory if set
             match &app.download_dir {

@@ -38,7 +38,7 @@ It satisfies all baseline requirements for COSC 473 A2 and adds a polished text-
 | Category | Details |
 |----------|---------|
 | **Global Chat** | Simple room where every message is broadcast. |
-| **Global User List** | Sidebar showing nicknames **+ PeerIDs**. Online status auto-refreshes every 15 s. |
+| **Global User List** | Sidebar showing nicknames **+ PeerIDs**. Online status auto-refreshes every 5s. |
 | **Private Chats** | One-on-one pane for negotiation and file offers. |
 | **File Swapping** | `/offer <file>` → `/accept | /decline` → direct transfer (max 1 GB). |
 | **Visibility Controls** | `/hide` / `/show` toggles presence in the global list. |
@@ -131,8 +131,8 @@ It satisfies all baseline requirements for COSC 473 A2 and adds a polished text-
    4. Default **visibility ON**; first heartbeat sent immediately.
 
 2. **Heartbeat**  
-   - Every 15 s a lightweight pub-sub (gossipsub) ping announces presence.  
-   - Peers missing > 30 s marked **offline**.
+   - Every 5s a lightweight pub-sub (gossipsub) ping announces presence.  
+   - Peers missing > 10s marked **offline**.
 
 3. **Auto-Refresh**  
    - Discovery refresh runs silently every 60 s.  

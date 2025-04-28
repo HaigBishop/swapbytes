@@ -27,7 +27,9 @@ use ratatui::{
 mod tui;
 mod utils;
 mod commands;
+mod behavior;
 use tui::{App, AppEvent, InputMode, FocusPane, layout_chunks};
+use behavior::{SwapBytesBehaviour, SwapBytesBehaviourEvent};
 
 /// Entry point: sets up TUI, libp2p, and event loop.
 #[tokio::main]
@@ -57,7 +59,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             noise::Config::new,
             yamux::Config::default,
         )?
-        .with_behaviour(|_| ping::Behaviour::default())?
+        .with_behaviour(|_| SwapBytesBehaviour::default())?
         .build();
 
     // Listen on all interfaces, random OS-assigned port.
@@ -154,8 +156,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 // Update scrollbar state stored in app (ensure content len & viewport are correct)
                 app.console_viewport_height = log_area.height as usize;
 
-                // Scrollbar rendering removed - we'll keep just the keyboard scrolling functionality
-
                 // --- Set cursor position (only in Editing mode) ---
                 match app.input_mode {
                     InputMode::Normal => {} // Cursor hidden by default
@@ -183,7 +183,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             // Print the address to the console
                             // app.push(format!("Listening on {address}"));
                         }
-                        SwarmEvent::Behaviour(ping::Event { peer, result, .. }) => {
+                        SwarmEvent::Behaviour(
+                            SwapBytesBehaviourEvent::Ping(ping::Event { peer, result, .. })
+                        ) => {
                             match result {
                                 Ok(latency) => {
                                     app.push(format!("Successfully pinged peer: {peer} ({latency:?})"));

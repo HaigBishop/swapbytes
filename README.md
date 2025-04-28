@@ -131,7 +131,7 @@ It satisfies all baseline requirements for COSC 473 A2 and adds a polished text-
    4. Default **visibility ON**; first heartbeat sent immediately.
 
 2. **Heartbeat**  
-   - Every 15 s a lightweight pub-sub ping announces presence.  
+   - Every 15 s a lightweight pub-sub (gossipsub) ping announces presence.  
    - Peers missing > 30 s marked **offline**.
 
 3. **Auto-Refresh**  

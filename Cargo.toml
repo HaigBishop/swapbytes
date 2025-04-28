@@ -6,7 +6,7 @@ license = "MIT"
 
 [dependencies]
     # P2P networking
-    libp2p = { version = "0.55", features = ["noise", "ping", "tcp", "tokio", "yamux"] }
+    libp2p = { version = "0.55", features = ["noise", "ping", "tcp", "tokio", "yamux", "macros"] }
 
     # Async primitives
     futures = "0.3.30"

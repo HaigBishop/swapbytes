@@ -17,8 +17,9 @@ use crossterm::event;
 use std::path::PathBuf;
 
 // libp2p imports
-use libp2p::{ping, swarm::SwarmEvent};
+use libp2p::swarm::SwarmEvent;
 use libp2p::Multiaddr;
+use crate::behavior::SwapBytesBehaviourEvent;
 
 /// Input modes for the TUI.
 #[derive(Debug, Default)]
@@ -304,7 +305,7 @@ pub enum AppEvent {
     /// User keyboard input.
     Input(event::KeyEvent),
     /// Event originating from the libp2p Swarm.
-    Swarm(SwarmEvent<ping::Event>),
+    Swarm(SwarmEvent<SwapBytesBehaviourEvent>),
     /// User command to dial a peer (sent from UI to Swarm task).
     Dial(Multiaddr),
     /// Message to be logged in the UI (sent from Swarm task to UI).

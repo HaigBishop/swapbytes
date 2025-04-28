@@ -18,3 +18,4 @@ license = "MIT"
     # TUI
     ratatui = "0.29.0"
     crossterm = "0.29.0"
+uuid = { version = "1.16.0", features = ["v4"] }

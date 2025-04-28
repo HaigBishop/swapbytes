@@ -25,6 +25,7 @@ use ratatui::{
 
 // Local modules
 mod tui;
+mod utils;
 use tui::{App, AppEvent, InputMode, FocusPane};
 
 /// Entry point: sets up TUI, libp2p, and event loop.

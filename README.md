@@ -2,7 +2,7 @@
 
 **A peer-to-peer file-bartering CLI built in Rust with [`libp2p`](https://libp2p.io) and an ergonomic TUI powered by [`ratatui`](https://github.com/ratatui-org/ratatui).**
 
-> _“Got notes? Need notes? Swap ‘em.”_ – **COSC 473 (2025)** Assignment 2
+> _"Got notes? Need notes? Swap 'em."_ – **COSC 473 (2025)** Assignment 2
 
 ---
 
@@ -117,8 +117,9 @@ It satisfies all baseline requirements for COSC 473 A2 and adds a polished text-
 | `/connect <peer>` | global | Manually dial a peer by`nickname`, `PeerID`, or `multiaddr`. |
 | `/refresh` | global | Force immediate peer discovery refresh. |
 | `/hide` / `/show` | global | Toggle your visibility in the Global User List. |
-| `/setdir <path>` | global | Change download directory (validated). |
+| `/setdir <path>` | global | Change download directory (validated absolute path). |
 | `/setname <name>` | global | Change nickname (validated). |
+| `/me`           | global       | Show information about you (addrs, nickname, etc.)   |
 | `/reset`          | global       | Wipe runtime state and restart the join wizard.              |
 | `/quit`           | global       | Quit the application                                         |
 
@@ -149,7 +150,7 @@ It satisfies all baseline requirements for COSC 473 A2 and adds a polished text-
 | `nickname` clash | Allowed, but both peers print a warning. |
 | File does not exist | Offer rejected, requester notified. |
 | File > 1 GB | Offer rejected, sender notified. |
-| Transfer failure / disconnect | Both peers see **“File transfer failed – please retry.”** |
+| Transfer failure / disconnect | Both peers see **"File transfer failed – please retry."** |
 | Invalid download dir | App blocks until a valid, writable path is provided. |
 | Path traversal attempt (`../../`) | Offer rejected for safety. |
 

@@ -14,6 +14,7 @@ use ratatui::{
     style::{Color, Style},
 };
 use crossterm::event;
+use std::path::PathBuf;
 
 // libp2p imports
 use libp2p::{ping, swarm::SwarmEvent};
@@ -57,6 +58,10 @@ pub struct App {
     pub console_viewport_height: usize,
     /// Addresses the Swarm is listening on.
     pub listening_addresses: Vec<Multiaddr>,
+    /// Currently configured download directory (must be verified).
+    pub download_dir: Option<PathBuf>,
+    /// User's chosen nickname (must be verified).
+    pub nickname: Option<String>,
 }
 
 impl Default for App {
@@ -71,6 +76,8 @@ impl Default for App {
             console_scroll: 0, // Start at the top
             console_viewport_height: 2, // default minimal height
             listening_addresses: Vec::new(), // Initialize empty list
+            download_dir: None, // Initialize as None
+            nickname: None, // Initialize nickname as None
         }
     }
 }
@@ -172,59 +179,105 @@ impl App {
         self.push(format!("> {}", self.input)); // Log the entered command
 
         let command_parts: Vec<&str> = self.input.trim().splitn(2, ' ').collect();
-        let command_name = command_parts.get(0).unwrap_or(&"");
-        let args = command_parts.get(1).unwrap_or(&"");
+        let command_name = *command_parts.get(0).unwrap_or(&"");
+        let args = command_parts.get(1).unwrap_or(&"").trim(); // Trim args
 
         let mut event_to_send = None;
 
-        // /ping command
-        if *command_name == "/ping" {
-            if args.is_empty() {
-                self.push("Usage: /ping <multiaddr>".to_string());
-            } else {
-                match args.parse::<Multiaddr>() {
-                    Ok(addr) => {
-                        // Don't push "Dialing..." here, let the main loop do it
-                        // after successfully calling swarm.dial()
-                        event_to_send = Some(AppEvent::Dial(addr));
-                    }
-                    Err(e) => {
-                        self.push(format!("Invalid Multiaddr: {e}"));
+        match command_name {
+            "/ping" => {
+                if args.is_empty() {
+                    self.push("Usage: /ping <multiaddr>".to_string());
+                } else {
+                    match args.parse::<Multiaddr>() {
+                        Ok(addr) => {
+                            event_to_send = Some(AppEvent::Dial(addr));
+                        }
+                        Err(e) => {
+                            self.push(format!("Invalid Multiaddr: {e}"));
+                        }
                     }
                 }
             }
-
-        // /me command
-        } else if *command_name == "/me" {
-            self.push("You are listening on addresses:".to_string());
-            if self.listening_addresses.is_empty() {
-                self.push("  (Not listening on any addresses right now)".to_string());
-            } else {
-                // Clone addresses to avoid borrowing issues with self.push
-                let addrs_to_print: Vec<String> = self.listening_addresses
-                    .iter()
-                    .map(|addr| format!("  {}", addr))
-                    .collect();
-                for addr_str in addrs_to_print {
-                    self.push(addr_str);
+            "/me" => {
+                // Show listening addresses
+                self.push("You are listening on addresses:".to_string());
+                if self.listening_addresses.is_empty() {
+                    self.push("  (Not listening on any addresses right now)".to_string());
+                } else {
+                    let addrs_to_print: Vec<String> = self.listening_addresses
+                        .iter()
+                        .map(|addr| format!("  {}", addr))
+                        .collect();
+                    for addr_str in addrs_to_print {
+                        self.push(addr_str);
+                    }
+                }
+                 // Show download directory if set
+                match &self.download_dir {
+                    Some(dir) => self.push(format!("Download directory: {}", dir.display())),
+                    None => self.push("Download directory: (Not set - use /setdir)".to_string()),
+                }
+                // Show nickname if set
+                match &self.nickname {
+                    Some(name) => self.push(format!("Nickname: {}", name)),
+                    None => self.push("Nickname: (Not set - use /setname)".to_string()),
                 }
             }
-
-        // /quit command
-        } else if *command_name == "/quit" || *command_name == "/q" {
-            // Signal the main loop to quit
-            event_to_send = Some(AppEvent::Quit);
-
-        // /help command
-        } else if *command_name == "/help" || *command_name == "/h" {
-            self.push("SwapBytes Commands:".to_string());
-            self.push("  /me               - Show my listening addresses.".to_string());
-            self.push("  /quit             - Exit SwapBytes.".to_string());
-            self.push("  /ping <multiaddr> - Ping a peer.".to_string());
-
-        // Unknown command
-        } else if !self.input.trim().is_empty() { // Only show unknown if not empty
-            self.push(format!("Unknown command: {}", command_name));
+            "/setdir" => {
+                if args.is_empty() {
+                    self.push("Usage: /setdir <absolute_path>".to_string());
+                } else {
+                    // Call the verification function from utils
+                    // Note: This blocks briefly. For heavy I/O, consider spawning a task.
+                    match crate::utils::verify_download_directory(args) {
+                        Ok(verified_path) => {
+                            self.push(format!("Download directory set to: {}", verified_path.display()));
+                            self.download_dir = Some(verified_path);
+                        }
+                        Err(err_msg) => {
+                            self.push(format!("Error setting directory: {}", err_msg));
+                        }
+                    }
+                }
+            }
+            "/setname" => {
+                if args.is_empty() {
+                    self.push("Usage: /setname <nickname>".to_string());
+                } else {
+                    // Call the verification function from utils
+                    match crate::utils::verify_nickname(args) {
+                        Ok(verified_name) => {
+                            self.push(format!("Nickname set to: {}", verified_name));
+                            self.nickname = Some(verified_name);
+                            // TODO: Broadcast nickname change to network
+                        }
+                        Err(err_msg) => {
+                            self.push(format!("Error setting nickname: {}", err_msg));
+                        }
+                    }
+                }
+            }
+            "/quit" | "/q" => {
+                event_to_send = Some(AppEvent::Quit);
+            }
+            "/help" | "/h" => {
+                self.push("SwapBytes Commands:".to_string());
+                self.push("  /me               - Show my info (addrs, dir, nickname).".to_string());
+                self.push("  /setdir <path>    - Set the absolute path for downloads.".to_string());
+                self.push("  /setname <name>   - Set your nickname (3-16 chars, a-z, A-Z, 0-9, -, _).".to_string());
+                self.push("  /ping <multiaddr> - Ping a peer.".to_string());
+                self.push("  /quit             - Exit SwapBytes.".to_string());
+                // Add other commands here as needed
+                self.push("  /help             - Show this help message.".to_string());
+            }
+            // Unknown command
+            _ => {
+                 if !command_name.is_empty() { // Only show unknown if not empty
+                    self.push(format!("Unknown command: {}", command_name));
+                    self.push("Type /help for a list of commands.".to_string());
+                }
+            }
         }
 
         self.input.clear();

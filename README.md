@@ -150,6 +150,10 @@ It satisfies all baseline requirements for COSC 473 A2 and adds a polished text-
    - Every 2s a lightweight pub-sub (gossipsub) ping announces presence.  
    - Peers missing > 8s marked **offline**.
 
+3. **Chat**
+   - At any time a user can chat on the **Global Chat** visible to anyone.
+   - Users can open a **Private Chat** with a particular user, automatically notifying that user.
+   - Within a private chat users can trade files.
 
 ---
 

@@ -25,6 +25,15 @@ use libp2p::swarm::SwarmEvent;
 use libp2p::{Multiaddr, PeerId};
 use crate::behavior::SwapBytesBehaviourEvent;
 
+/// Represents a single message in the chat history.
+#[derive(Debug, Clone)]
+pub struct ChatMessage {
+    pub sender_id: PeerId,
+    pub sender_nickname: Option<String>,
+    pub content: String,
+    pub timestamp_ms: u64,
+}
+
 /// Time to wait before resetting the pinging state indicator.
 pub const PINGING_DURATION: Duration = Duration::from_millis(2000);
 
@@ -109,6 +118,12 @@ pub struct App {
     pub is_visible: bool,
     /// The current chat context (global or private).
     pub current_chat_context: ChatContext,
+    /// History of global chat messages.
+    pub global_chat_history: Vec<ChatMessage>,
+    /// Vertical scroll position for the chat message view.
+    pub chat_scroll: usize,
+    /// Height of the chat viewport (number of visible lines).
+    pub chat_viewport_height: usize,
 }
 
 impl Default for App {
@@ -139,6 +154,9 @@ impl Default for App {
             ping_start_time: None, // Initialize ping start time
             is_visible: true, // User is visible by default
             current_chat_context: ChatContext::Global, // Default to global chat
+            global_chat_history: Vec::new(), // Initialize empty global chat history
+            chat_scroll: 0, // Start chat scroll at the top
+            chat_viewport_height: 2, // Default minimal chat height
         }
     }
 }
@@ -382,41 +400,78 @@ impl App {
 
         // --- Render actual user list inside inner_area ---
         let mut items = Vec::new();
-        // Sort peers by PeerId (base58 representation) for a consistent order.
-        let mut sorted_peers: Vec<_> = self.peers.iter().collect();
-        sorted_peers.sort_by_key(|(id, _)| id.to_base58());
 
-        for (peer_id, peer_info) in sorted_peers {
-            // Always include the last 6 chars of the PeerId
+        // Add self ("You") to the top of the list if local_peer_id is set
+        if let Some(local_id) = self.local_peer_id {
+            let id_str = local_id.to_base58();
+            let len = id_str.len();
+            let start_index = len.saturating_sub(6);
+            let id_suffix = format!("(...{})", &id_str[start_index..]);
+            let display_name = format!("You {}", id_suffix);
+            // Set prefix and style based on visibility status
+            let (prefix, status_style) = if self.is_visible {
+                ("[✓] ", Style::default().fg(Color::Green)) // Visible/Online style
+            } else {
+                ("[✗] ", Style::default().fg(Color::Gray)) // Not visible/Offline style
+            };
+            let line = Line::from(vec![
+                Span::styled(prefix, status_style),
+                Span::raw(display_name),
+            ]);
+            items.push(ListItem::new(line));
+        }
+
+        // Partition peers into online and offline lists
+        let mut online_peers: Vec<_> = Vec::new();
+        let mut offline_peers: Vec<_> = Vec::new();
+
+        for (peer_id, peer_info) in self.peers.iter() {
+            // Exclude self from the peer lists
+            if Some(*peer_id) == self.local_peer_id {
+                continue;
+            }
+            match peer_info.status {
+                OnlineStatus::Online => online_peers.push((peer_id, peer_info)),
+                OnlineStatus::Offline => offline_peers.push((peer_id, peer_info)),
+            }
+        }
+
+        // Sort online and offline peers by PeerId (base58 representation)
+        online_peers.sort_by_key(|(id, _)| id.to_base58());
+        offline_peers.sort_by_key(|(id, _)| id.to_base58());
+
+        // Helper closure to create a list item line
+        let create_list_item = |peer_id: &PeerId, peer_info: &PeerInfo| {
             let id_str = peer_id.to_base58();
             let len = id_str.len();
             let start_index = len.saturating_sub(6);
             let id_suffix = format!("(...{})", &id_str[start_index..]);
 
-            // Prepend nickname or "Unknown User" is the nickname is not known
             let display_name = match &peer_info.nickname {
                 Some(nickname) => format!("{} {}", nickname, id_suffix),
                 None => format!("Unknown User {}", id_suffix),
             };
 
-            // Style the status prefix based on whether the peer is Online or Offline.
-            let status_style = match peer_info.status {
-                OnlineStatus::Online => Style::default().fg(Color::Green),
-                OnlineStatus::Offline => Style::default().fg(Color::Gray),
+            let (prefix, status_style) = match peer_info.status {
+                OnlineStatus::Online => ("[✓] ", Style::default().fg(Color::Green)),
+                OnlineStatus::Offline => ("[✗] ", Style::default().fg(Color::Gray)),
             };
 
-            // Define the status prefix string.
-            let prefix = match peer_info.status {
-                OnlineStatus::Online => "[✓] ",
-                OnlineStatus::Offline => "[✗] ",
-            };
-            // Construct the line with styled prefix and raw display name using Spans
-            // for explicit control over styling.
             let line = Line::from(vec![
-                Span::styled(prefix, status_style), // Use Span::styled
-                Span::raw(display_name),       // Use Span::raw for the string part
+                Span::styled(prefix, status_style),
+                Span::raw(display_name),
             ]);
-            items.push(ListItem::new(line));
+            ListItem::new(line)
+        };
+
+        // Add online peers to the list
+        for (peer_id, peer_info) in online_peers {
+            items.push(create_list_item(peer_id, peer_info));
+        }
+
+        // Add offline peers to the list
+        for (peer_id, peer_info) in offline_peers {
+            items.push(create_list_item(peer_id, peer_info));
         }
 
         // Create the list widget with the generated items.
@@ -458,9 +513,45 @@ impl App {
         let messages_area = chat_chunks[0];
         let input_area = chat_chunks[1];
 
-        // TODO: Render chat messages inside messages_area
-        let placeholder_text = Paragraph::new("Chat messages coming soon...");
-        placeholder_text.render(messages_area, buf);
+        // --- Render Chat Messages ---
+        match &self.current_chat_context {
+            ChatContext::Global => {
+                // Format messages from global_chat_history
+                let messages: Vec<Line> = self.global_chat_history.iter().map(|msg| {
+                    // Determine the sender display name
+                    let sender_display = if Some(msg.sender_id) == self.local_peer_id {
+                        "You".to_string() // Display "You" for own messages
+                    } else {
+                        msg.sender_nickname.clone().unwrap_or_else(|| {
+                            // Show last 6 chars of PeerId if nickname is unknown
+                            let id_str = msg.sender_id.to_base58();
+                            let len = id_str.len();
+                            format!("user(...{})", &id_str[len.saturating_sub(6)..])
+                        })
+                    };
+
+                    // Basic formatting: <sender>: content
+                    // TODO: Add timestamp formatting later if needed
+                    Line::from(vec![
+                        Span::styled(format!("{}: ", sender_display), Style::default().bold()),
+                        Span::raw(&msg.content),
+                    ])
+                }).collect();
+
+                // Update viewport height for scrolling calculation
+                // self.chat_viewport_height = messages_area.height as usize; // Set in main.rs
+
+                let chat_paragraph = Paragraph::new(messages)
+                    .scroll((self.chat_scroll as u16, 0)); // Apply vertical scroll
+                chat_paragraph.render(messages_area, buf);
+            }
+            ChatContext::Private { .. } => {
+                // Placeholder for private chat rendering
+                let placeholder_text = Paragraph::new("Private chat messages coming soon...");
+                placeholder_text.render(messages_area, buf);
+                // TODO: Implement private chat history rendering
+            }
+        }
 
         // Render Chat Input Box within its area
         let chat_input_paragraph = Paragraph::new(self.chat_input.as_str())
@@ -511,6 +602,10 @@ pub enum AppEvent {
     NicknameUpdated(PeerId, String),
     /// User visibility has changed (sent from UI to Swarm task).
     VisibilityChanged(bool),
+    /// Received a global chat message from the network.
+    GlobalMessageReceived { sender_id: PeerId, sender_nickname: Option<String>, content: String, timestamp_ms: u64 },
+    /// Request the Swarm task to publish a message to Gossipsub.
+    PublishGossipsub(Vec<u8>),
 }
 
 // Computes the layout rectangles for the chat, console, and users list.

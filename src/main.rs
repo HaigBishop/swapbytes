@@ -49,6 +49,11 @@ enum Message {
         timestamp_ms: u64, // Add timestamp field
         nickname: Option<String>, // Add optional nickname
     },
+    GlobalChatMessage {
+        content: String,
+        timestamp_ms: u64,
+        nickname: Option<String>,
+    },
     // Add other message types like Chat, NicknameUpdate later
 }
 
@@ -177,6 +182,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         AppEvent::VisibilityChanged(new_visibility) => {
                             is_visible = new_visibility;
                         }
+                        // Handle publishing gossipsub messages
+                        AppEvent::PublishGossipsub(data) => {
+                            if let Err(e) = swarm.behaviour_mut().gossipsub.publish(topic.clone(), data) {
+                                // Ignore InsufficientPeers, log other messages though
+                                if e.to_string() != "InsufficientPeers" {
+                                    let _ = swarm_tx.send(AppEvent::LogMessage(format!("Failed to publish chat message: {e}")));
+                                }
+                            }
+                        }
                         // Ignore other commands if any were sent here by mistake
                         _ => {}
                     }
@@ -208,9 +222,74 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                     // let _ = swarm_tx.send(AppEvent::PeerExpired(peer_id));
                                 }
                             }
-                            // Forward other events (including Gossipsub messages, Ping, etc.) to the UI task
-                            other_event => {
-                                let _ = swarm_tx.send(AppEvent::Swarm(other_event));
+                            // --- Handle Gossipsub Messages ---
+                            SwarmEvent::Behaviour(SwapBytesBehaviourEvent::Gossipsub(gossipsub::Event::Message {
+                                propagation_source: peer_id, // The peer who forwarded us the message
+                                message_id: _id,
+                                message,
+                            })) => {
+                                // Attempt to deserialize the message
+                                match serde_json::from_slice::<Message>(&message.data) {
+                                    Ok(deserialized_msg) => {
+                                        match deserialized_msg {
+                                            Message::Heartbeat { timestamp_ms: _, nickname } => {
+                                                // Send NicknameUpdated event if nickname is present
+                                                if let Some(nick) = nickname {
+                                                    // Use the actual source peer ID from the message if available,
+                                                    // otherwise, we assume the forwarder is the source for nickname updates.
+                                                    // NOTE: For gossipsub, message.source is usually None unless message signing is enabled.
+                                                    let source_peer_id = message.source.unwrap_or(peer_id);
+                                                    let _ = swarm_tx.send(AppEvent::NicknameUpdated(source_peer_id, nick));
+                                                }
+                                                // Also forward the raw event to update the forwarder's last_seen
+                                                let _ = swarm_tx.send(AppEvent::Swarm(SwarmEvent::Behaviour(SwapBytesBehaviourEvent::Gossipsub(gossipsub::Event::Message {
+                                                    propagation_source: peer_id,
+                                                    message_id: _id,
+                                                    message: message.clone(), // Clone message needed here
+                                                }))));
+                                            }
+                                            Message::GlobalChatMessage { content, timestamp_ms, nickname } => {
+                                                // Send the specific GlobalMessageReceived event
+                                                // Use the actual source peer ID if available, otherwise use the forwarder
+                                                let source_peer_id = message.source.unwrap_or(peer_id);
+                                                let _ = swarm_tx.send(AppEvent::GlobalMessageReceived {
+                                                    sender_id: source_peer_id,
+                                                    sender_nickname: nickname,
+                                                    content,
+                                                    timestamp_ms,
+                                                });
+                                                // Also forward the raw event to update the forwarder's last_seen
+                                                 let _ = swarm_tx.send(AppEvent::Swarm(SwarmEvent::Behaviour(SwapBytesBehaviourEvent::Gossipsub(gossipsub::Event::Message {
+                                                    propagation_source: peer_id,
+                                                    message_id: _id,
+                                                    message: message.clone(), // Clone message needed here
+                                                }))));
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        // Log deserialization error, but still forward raw event for presence
+                                        let _ = swarm_tx.send(AppEvent::LogMessage(format!("Failed to deserialize gossipsub message: {e}")));
+                                        let _ = swarm_tx.send(AppEvent::Swarm(SwarmEvent::Behaviour(SwapBytesBehaviourEvent::Gossipsub(gossipsub::Event::Message {
+                                            propagation_source: peer_id,
+                                            message_id: _id,
+                                            message: message.clone(), // Clone message needed here
+                                        }))));
+                                    }
+                                }
+                            }
+                            // Forward other behaviour events (like Ping) generically
+                            SwarmEvent::Behaviour(other_behaviour_event) => {
+                                // Check if it's NOT a Gossipsub event before forwarding generically
+                                // (We handled Gossipsub::Message specifically above)
+                                if !matches!(other_behaviour_event, SwapBytesBehaviourEvent::Gossipsub(_)) {
+                                     let _ = swarm_tx.send(AppEvent::Swarm(SwarmEvent::Behaviour(other_behaviour_event)));
+                                }
+                                // Ignore other Gossipsub event types for now (like Subscribed, Unsubscribed)
+                            }
+                            // Forward non-behaviour swarm events (like NewListenAddr, ConnectionEstablished, etc.)
+                            other_swarm_event => {
+                                let _ = swarm_tx.send(AppEvent::Swarm(other_swarm_event));
                             }
                         }
                     } else {
@@ -293,6 +372,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 // Update scrollbar state stored in app (ensure content len & viewport are correct)
                 app.console_viewport_height = log_area.height as usize;
 
+                // --- Calculate Chat Message Area and Update Viewport Height ---
+                let chat_block = Block::bordered(); // Temporary block for inner area calc
+                let chat_inner_area = chat_block.inner(chat_area);
+                let chat_chunks_for_height = Layout::vertical([
+                    Constraint::Min(1),      // Messages area
+                    Constraint::Length(3), // Chat input area
+                ]).split(chat_inner_area);
+                let messages_area = chat_chunks_for_height[0];
+                app.chat_viewport_height = messages_area.height as usize;
+
                 // --- Set cursor position (only in Command mode) ---
                 match app.input_mode {
                     InputMode::Normal => {} // Cursor hidden by default
@@ -305,14 +394,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         ));
                     }
                     InputMode::Chat => {
-                        // --- Calculate Chat Input Area for cursor ---
-                        let chat_block = Block::bordered(); // Temporary block for inner area calc
-                        let chat_inner_area = chat_block.inner(chat_area);
-                        let chat_chunks = Layout::vertical([
-                            Constraint::Min(1),      // Messages area
-                            Constraint::Length(3), // Chat input area
-                        ]).split(chat_inner_area);
-                        let chat_input_area = chat_chunks[1];
+                        // --- Calculate Chat Input Area for cursor (re-use chat_chunks_for_height) ---
+                        // Note: We calculated chunks earlier to get messages_area height.
+                        // Re-using the calculation here avoids redundant code.
+                        let chat_input_area = chat_chunks_for_height[1];
 
                         // Set cursor for chat input
                         f.set_cursor_position(Position::new(
@@ -368,75 +453,22 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                 // Mdns events are handled in the swarm task now
                                 // SwarmEvent::Behaviour(SwapBytesBehaviourEvent::Mdns(...)) => { ... }
 
-                                SwarmEvent::Behaviour(
-                                    SwapBytesBehaviourEvent::Gossipsub(gossipsub::Event::Message {
-                                        propagation_source: peer_id,
-                                        message_id: id,
-                                        message,
-                                    })
-                                ) => {
-                                    // Use `propagation_source` (peer_id) to update the status of the *forwarding* peer.
-                                    let forwarder_peer_id = peer_id;
-                                    // Avoid the unused warnings
-                                    let _ = id;
-
-                                    // Update the forwarder's status/last_seen
-                                    let now = Instant::now();
-                                    let forwarder_info = app.peers.entry(forwarder_peer_id).or_insert_with(|| {
-                                        // Insert if new
-                                        PeerInfo {
-                                            nickname: None, // Nickname unknown until exchanged
-                                            status: OnlineStatus::Online,
-                                            last_seen: now,
-                                        }
-                                    });
-                                    // Modify the entry (whether newly inserted or existing)
-                                    forwarder_info.last_seen = now;
-                                    forwarder_info.status = OnlineStatus::Online;
-
-                                    // Attempt to deserialize the message data
-                                    match serde_json::from_slice::<Message>(&message.data) {
-                                        Ok(msg_content) => {
-                                            // Use message.source (original sender) for nickname association
-                                            if let Some(original_sender_peer_id) = message.source {
-                                                // Also update original sender's status/last_seen
-                                                let original_sender_info = app.peers.entry(original_sender_peer_id).or_insert_with(|| {
-                                                    PeerInfo {
-                                                        nickname: None, // Nickname unknown until exchanged
-                                                        status: OnlineStatus::Online,
-                                                        last_seen: now,
-                                                    }
-                                                });
-                                                original_sender_info.last_seen = now;
-                                                original_sender_info.status = OnlineStatus::Online;
-
-                                                match msg_content {
-                                                    Message::Heartbeat { nickname: Some(received_nickname), .. } => {
-                                                        // Update nickname for the *original sender* if different
-                                                        if original_sender_info.nickname.as_ref() != Some(&received_nickname) {
-                                                            original_sender_info.nickname = Some(received_nickname);
-                                                            // redraw will be set outside the match
-                                                        }
-                                                    }
-                                                    // Handle other message types here later (e.g., Chat)
-                                                    _ => {}
-                                                }
-                                            } else {
-                                                // This shouldn't happen with signed messages, but handle defensively.
-                                                app.push(format!(
-                                                    "Received message without source from {forwarder_peer_id}"
-                                                ));
-                                            }
-                                        }
-                                        Err(e) => {
-                                            // Log deserialization errors, but don't crash
-                                            app.push(format!(
-                                                "Error deserializing message from {forwarder_peer_id}: {e}"
-                                            ));
+                                // --- Handle forwarded Gossipsub Messages to update last_seen ---
+                                // This ensures peers stay online if they are forwarding messages (e.g., heartbeats)
+                                SwarmEvent::Behaviour(SwapBytesBehaviourEvent::Gossipsub(gossipsub::Event::Message {
+                                    propagation_source: peer_id, // The peer who forwarded the message
+                                    .. // Ignore other fields here, we just need the source
+                                })) => {
+                                    if let Some(peer_info) = app.peers.get_mut(&peer_id) {
+                                        peer_info.last_seen = Instant::now();
+                                        // If they were marked offline, mark them online again upon receiving a message
+                                        if peer_info.status == OnlineStatus::Offline {
+                                            peer_info.status = OnlineStatus::Online;
                                         }
                                     }
-
+                                    // If the peer is not in the map yet, PeerDiscovered or NicknameUpdated will handle adding them.
                                 }
+
                                 SwarmEvent::OutgoingConnectionError { error, .. } => {
                                     // This logging is commented out to hide a harmless "Failed to negotiate transport protocol(s)" error
                                     // Connection eventually succeeds via the LAN address, so the error can be safely ignored.
@@ -480,8 +512,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                                 };
                                                 redraw = true;
                                             }
-                                            // Enter Command Mode (if user hits / and Console focused)
-                                            KeyCode::Char('/') if app.focused_pane == FocusPane::Console => {
+                                            // Enter Command Mode (if user hits /) - Removed focus check
+                                            KeyCode::Char('/') => {
+                                                app.focused_pane = FocusPane::Console; // Ensure console is focused
                                                 app.input_mode = InputMode::Command;
                                                 app.input.clear();
                                                 app.input.push('/');
@@ -496,6 +529,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                             KeyCode::Down if app.focused_pane == FocusPane::Console => {
                                                 let max_scroll = app.log.len().saturating_sub(app.console_viewport_height);
                                                 app.console_scroll = app.console_scroll.saturating_add(1).min(max_scroll);
+                                                redraw = true;
+                                            }
+                                            // Chat Scrolling (Up/Down)
+                                            KeyCode::Up if app.focused_pane == FocusPane::Chat => {
+                                                app.chat_scroll = app.chat_scroll.saturating_sub(1);
+                                                redraw = true;
+                                            }
+                                            KeyCode::Down if app.focused_pane == FocusPane::Chat => {
+                                                // Calculate max_scroll based on chat history and viewport
+                                                let max_scroll = app.global_chat_history.len().saturating_sub(app.chat_viewport_height);
+                                                app.chat_scroll = app.chat_scroll.saturating_add(1).min(max_scroll);
                                                 redraw = true;
                                             }
                                             // Enter Chat Mode (if any char pressed and Chat focused)
@@ -561,7 +605,24 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                                 app.move_cursor_right();
                                                 redraw = true;
                                             }
+                                            // Add scrolling for Command mode
+                                            KeyCode::Up => {
+                                                app.console_scroll = app.console_scroll.saturating_sub(1);
+                                                redraw = true;
+                                            }
+                                            KeyCode::Down => {
+                                                let max_scroll = app.log.len().saturating_sub(app.console_viewport_height);
+                                                app.console_scroll = app.console_scroll.saturating_add(1).min(max_scroll);
+                                                redraw = true;
+                                            }
                                             KeyCode::Esc => {
+                                                app.input_mode = InputMode::Normal;
+                                                app.input.clear();
+                                                app.reset_cursor();
+                                                redraw = true;
+                                            }
+                                            KeyCode::Tab => {
+                                                // Exit command mode, stay in console focus
                                                 app.input_mode = InputMode::Normal;
                                                 app.input.clear();
                                                 app.reset_cursor();
@@ -575,13 +636,73 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                     if key.kind == KeyEventKind::Press {
                                         match key.code {
                                             KeyCode::Enter => {
-                                                // Send EnterChat event with current input
-                                                let _ = tx.send(AppEvent::EnterChat(app.chat_input.clone()));
-                                                // Clear input and return to normal mode
-                                                app.chat_input.clear();
-                                                app.reset_chat_cursor();
-                                                app.input_mode = InputMode::Normal;
-                                                redraw = true;
+                                                // Only process if there's input and we are in global chat
+                                                if !app.chat_input.is_empty() && app.current_chat_context == tui::ChatContext::Global {
+                                                    let timestamp_ms = SystemTime::now()
+                                                        .duration_since(UNIX_EPOCH)
+                                                        .expect("Time went backwards")
+                                                        .as_millis() as u64;
+                                                    let nickname = app.nickname.clone();
+                                                    let local_peer_id = app.local_peer_id.expect("Local PeerID must be set");
+                                                    let content = app.chat_input.clone();
+
+                                                    // Create the network message
+                                                    let message = Message::GlobalChatMessage {
+                                                        content: content.clone(),
+                                                        timestamp_ms,
+                                                        nickname: nickname.clone(),
+                                                    };
+
+                                                    // Serialize the message for the network
+                                                    match serde_json::to_vec(&message) {
+                                                        Ok(data) => {
+                                                            // Send event to swarm task to publish
+                                                            if let Err(e) = cmd_tx.send(AppEvent::PublishGossipsub(data)) {
+                                                                app.push(format!("Error sending publish command: {}", e));
+                                                            }
+
+                                                            // Add the message to local history
+                                                            let local_chat_msg = tui::ChatMessage {
+                                                                sender_id: local_peer_id,
+                                                                sender_nickname: nickname,
+                                                                content,
+                                                                timestamp_ms,
+                                                            };
+                                                            app.global_chat_history.push(local_chat_msg);
+
+                                                            // Auto-scroll chat view IF already at the bottom
+                                                            let current_max_scroll = app.global_chat_history.len().saturating_sub(app.chat_viewport_height.max(1)).saturating_sub(1); // Max scroll before adding
+                                                            if app.chat_scroll >= current_max_scroll {
+                                                                let new_max_scroll = app.global_chat_history.len().saturating_sub(app.chat_viewport_height.max(1));
+                                                                app.chat_scroll = new_max_scroll;
+                                                            }
+                                                             // Otherwise, if user has scrolled up, don't force scroll down.
+
+                                                            // Reset input field and mode
+                                                            app.chat_input.clear();
+                                                            app.reset_chat_cursor();
+                                                            app.input_mode = InputMode::Normal;
+                                                            redraw = true;
+
+                                                        }
+                                                        Err(e) => {
+                                                            app.push(format!("Error serializing chat message: {}", e));
+                                                            // Optionally, don't clear input on serialization error
+                                                        }
+                                                    }
+                                                } else if !app.chat_input.is_empty() && matches!(app.current_chat_context, tui::ChatContext::Private { .. }) {
+                                                    // Placeholder for Private Chat sending logic
+                                                    app.push(format!("[PRIVATE CHAT (not implemented)] {}", app.chat_input));
+                                                    // Clear input and return to normal mode (temporary)
+                                                    app.chat_input.clear();
+                                                    app.reset_chat_cursor();
+                                                    app.input_mode = InputMode::Normal;
+                                                    redraw = true;
+                                                } else {
+                                                    // Input is empty, just go back to normal mode
+                                                    app.input_mode = InputMode::Normal;
+                                                    redraw = true;
+                                                }
                                             }
                                             KeyCode::Char(to_insert) => {
                                                 app.enter_chat_char(to_insert);
@@ -597,6 +718,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                             }
                                             KeyCode::Right => {
                                                 app.move_chat_cursor_right();
+                                                redraw = true;
+                                            }
+                                            // Add scrolling for Chat mode
+                                            KeyCode::Up => {
+                                                app.chat_scroll = app.chat_scroll.saturating_sub(1);
+                                                redraw = true;
+                                            }
+                                            KeyCode::Down => {
+                                                let max_scroll = app.global_chat_history.len().saturating_sub(app.chat_viewport_height);
+                                                app.chat_scroll = app.chat_scroll.saturating_add(1).min(max_scroll);
                                                 redraw = true;
                                             }
                                             KeyCode::Esc => {
@@ -663,6 +794,33 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             // TODO: Send this message over gossipsub
                             app.push(format!("[CHAT SUBMITTED] {}", msg));
                             redraw = true;
+                        }
+                        AppEvent::GlobalMessageReceived { sender_id, sender_nickname, content, timestamp_ms } => {
+                            // app.log(format!("GlobalMessageReceived: {content} {timestamp_ms} from {sender_id}"));
+                            // Create the chat message struct
+                            let chat_msg = tui::ChatMessage {
+                                sender_id,
+                                sender_nickname,
+                                content,
+                                timestamp_ms,
+                            };
+                            // Add to history
+                            app.global_chat_history.push(chat_msg);
+
+                            // Auto-scroll chat view IF already at the bottom
+                            let current_max_scroll = app.global_chat_history.len().saturating_sub(app.chat_viewport_height.max(1)).saturating_sub(1); // Max scroll before adding
+                            if app.chat_scroll >= current_max_scroll {
+                                let new_max_scroll = app.global_chat_history.len().saturating_sub(app.chat_viewport_height.max(1));
+                                app.chat_scroll = new_max_scroll;
+                            }
+                             // Otherwise, if user has scrolled up, don't force scroll down.
+
+                            redraw = true;
+                        }
+                        AppEvent::PublishGossipsub(_) => {
+                            // This event is sent TO the swarm task, should not be received here.
+                            // Log if it happens, but otherwise ignore.
+                            app.log("Warning: Received PublishGossipsub event in UI loop.".to_string());
                         }
                     }
                 } else {

@@ -55,6 +55,8 @@ pub struct App {
     pub console_scroll: usize,
     /// Height of the console viewport (number of visible lines).
     pub console_viewport_height: usize,
+    /// Addresses the Swarm is listening on.
+    pub listening_addresses: Vec<Multiaddr>,
 }
 
 impl Default for App {
@@ -67,7 +69,8 @@ impl Default for App {
             exit: false,
             focused_pane: FocusPane::default(),
             console_scroll: 0, // Start at the top
-            console_viewport_height: 1, // default minimal height
+            console_viewport_height: 2, // default minimal height
+            listening_addresses: Vec::new(), // Initialize empty list
         }
     }
 }
@@ -191,6 +194,22 @@ impl App {
                 }
             }
 
+        // /me command
+        } else if *command_name == "/me" {
+            self.push("You are listening on addresses:".to_string());
+            if self.listening_addresses.is_empty() {
+                self.push("  (Not listening on any addresses right now)".to_string());
+            } else {
+                // Clone addresses to avoid borrowing issues with self.push
+                let addrs_to_print: Vec<String> = self.listening_addresses
+                    .iter()
+                    .map(|addr| format!("  {}", addr))
+                    .collect();
+                for addr_str in addrs_to_print {
+                    self.push(addr_str);
+                }
+            }
+
         // /quit command
         } else if *command_name == "/quit" || *command_name == "/q" {
             // Signal the main loop to quit
@@ -199,8 +218,9 @@ impl App {
         // /help command
         } else if *command_name == "/help" || *command_name == "/h" {
             self.push("SwapBytes Commands:".to_string());
-            self.push("  /ping <multiaddr> - Ping a peer.".to_string());
+            self.push("  /me               - Show my listening addresses.".to_string());
             self.push("  /quit             - Exit SwapBytes.".to_string());
+            self.push("  /ping <multiaddr> - Ping a peer.".to_string());
 
         // Unknown command
         } else if !self.input.trim().is_empty() { // Only show unknown if not empty
@@ -263,7 +283,7 @@ impl Widget for &App {
 
         // --- Console Panel (Adapted from previous main block) ---
         let console_title_bottom = match self.input_mode {
-            InputMode::Normal => " Focus: Tab | Scroll: ↑/↓ | Quit: Ctrl+q ".bold(), // Updated hint
+            InputMode::Normal => " Focus: Tab | Scroll: ↑/↓ | Quit: Ctrl+Q ".bold(), // Updated hint
             InputMode::Editing => " Submit: Enter | Cancel: Esc ".bold(),
         };
         let console_block = Block::bordered()

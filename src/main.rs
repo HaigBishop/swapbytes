@@ -1,5 +1,5 @@
 /*
-A temporary libp2p test program "ping". Now with a TUI!
+The main file for the SwapBytes CLI file-sharing application.
 */
 
 
@@ -108,8 +108,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     tokio::spawn(async move {
         loop {
             if kb_cancel.is_cancelled() { break; }
-            // Poll for key events every 250ms (non-blocking)
-            if event::poll(Duration::from_millis(250)).unwrap() {
+            // Poll for key events every 150ms (non-blocking)
+            if event::poll(Duration::from_millis(150)).unwrap() {
                 if let event::Event::Key(key) = event::read().unwrap() {
                     // Use kb_tx here
                     if kb_tx.send(AppEvent::Input(key)).is_err() {
@@ -123,6 +123,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     // --- Application state and main event loop ---
     let mut app = App::default();
+    app.push("Welcome to SwapBytes!".to_string());
+    app.push("Run /help to get started.".to_string());
     let mut redraw = true; // Force initial draw
 
     loop {
@@ -185,7 +187,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 AppEvent::Swarm(se) => {
                     match &se {
                         SwarmEvent::NewListenAddr { address, .. } => {
-                            app.push(format!("Listening on {address}"));
+                            // Store the address
+                            app.listening_addresses.push(address.clone());
+                            // Print the address to the console
+                            // app.push(format!("Listening on {address}"));
                         }
                         SwarmEvent::Behaviour(ping::Event { peer, result, .. }) => {
                             match result {

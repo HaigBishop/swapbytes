@@ -283,7 +283,7 @@ impl App {
         let input_title = if self.pinging {
             " Input (Pinging...) " // Indicate pinging state
         } else {
-            " Input (/) " // Normal state
+            " Command Input (/) " // Normal state
         };
         let input_paragraph = Paragraph::new(self.input.as_str())
             .style(match self.input_mode {

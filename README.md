@@ -6,6 +6,17 @@
 
 ---
 
+## To Do
+- console input only if focus on console
+- add Chat Input (just start typing) to Chat Pane
+- global chat
+- private chat
+- trade offer -> accept/decline
+- transfer of file
+- README.md & write-up
+
+---
+
 ## Table of Contents
 1. [What is SwapBytes?](#what-is-swapbytes)
 2. [Key Features](#key-features)

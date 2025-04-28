@@ -178,165 +178,30 @@ impl App {
     pub fn submit_command(&mut self) -> Option<AppEvent> {
         self.push(format!("> {}", self.input)); // Log the entered command
 
-        let command_parts: Vec<&str> = self.input.trim().splitn(2, ' ').collect();
-        let command_name = *command_parts.get(0).unwrap_or(&"");
-        let args = command_parts.get(1).unwrap_or(&"").trim(); // Trim args
+        // Create a copy of the input string to avoid borrow checker issues
+        let input_copy = self.input.clone(); 
+        let command_input = input_copy.strip_prefix('/').unwrap_or(&input_copy);
 
-        let mut event_to_send = None;
+        // Call the command processor from the commands module
+        let event_to_send = crate::commands::process_command(command_input, self);
 
-        match command_name {
-            "/ping" => {
-                if args.is_empty() {
-                    self.push("Usage: /ping <multiaddr>".to_string());
-                } else {
-                    match args.parse::<Multiaddr>() {
-                        Ok(addr) => {
-                            event_to_send = Some(AppEvent::Dial(addr));
-                        }
-                        Err(e) => {
-                            self.push(format!("Invalid Multiaddr: {e}"));
-                        }
-                    }
-                }
-            }
-            "/me" => {
-                // Show listening addresses
-                self.push("You are listening on addresses:".to_string());
-                if self.listening_addresses.is_empty() {
-                    self.push("  (Not listening on any addresses right now)".to_string());
-                } else {
-                    let addrs_to_print: Vec<String> = self.listening_addresses
-                        .iter()
-                        .map(|addr| format!("  {}", addr))
-                        .collect();
-                    for addr_str in addrs_to_print {
-                        self.push(addr_str);
-                    }
-                }
-                 // Show download directory if set
-                match &self.download_dir {
-                    Some(dir) => self.push(format!("Download directory: {}", dir.display())),
-                    None => self.push("Download directory: (Not set - use /setdir)".to_string()),
-                }
-                // Show nickname if set
-                match &self.nickname {
-                    Some(name) => self.push(format!("Nickname: {}", name)),
-                    None => self.push("Nickname: (Not set - use /setname)".to_string()),
-                }
-            }
-            "/setdir" => {
-                if args.is_empty() {
-                    self.push("Usage: /setdir <absolute_path>".to_string());
-                } else {
-                    // Call the verification function from utils
-                    // Note: This blocks briefly. For heavy I/O, consider spawning a task.
-                    match crate::utils::verify_download_directory(args) {
-                        Ok(verified_path) => {
-                            self.push(format!("Download directory set to: {}", verified_path.display()));
-                            self.download_dir = Some(verified_path);
-                        }
-                        Err(err_msg) => {
-                            self.push(format!("Error setting directory: {}", err_msg));
-                        }
-                    }
-                }
-            }
-            "/setname" => {
-                if args.is_empty() {
-                    self.push("Usage: /setname <nickname>".to_string());
-                } else {
-                    // Call the verification function from utils
-                    match crate::utils::verify_nickname(args) {
-                        Ok(verified_name) => {
-                            self.push(format!("Nickname set to: {}", verified_name));
-                            self.nickname = Some(verified_name);
-                            // TODO: Broadcast nickname change to network
-                        }
-                        Err(err_msg) => {
-                            self.push(format!("Error setting nickname: {}", err_msg));
-                        }
-                    }
-                }
-            }
-            "/quit" | "/q" => {
-                event_to_send = Some(AppEvent::Quit);
-            }
-            "/help" | "/h" => {
-                self.push("SwapBytes Commands:".to_string());
-                self.push("  /me               - Show my info (addrs, dir, nickname).".to_string());
-                self.push("  /setdir <path>    - Set the absolute path for downloads.".to_string());
-                self.push("  /setname <name>   - Set your nickname (3-16 chars, a-z, A-Z, 0-9, -, _).".to_string());
-                self.push("  /ping <multiaddr> - Ping a peer.".to_string());
-                self.push("  /quit             - Exit SwapBytes.".to_string());
-                // Add other commands here as needed
-                self.push("  /help             - Show this help message.".to_string());
-            }
-            // Unknown command
-            _ => {
-                 if !command_name.is_empty() { // Only show unknown if not empty
-                    self.push(format!("Unknown command: {}", command_name));
-                    self.push("Type /help for a list of commands.".to_string());
-                }
-            }
-        }
-
+        // Clear the original input field
         self.input.clear();
         self.reset_cursor();
         self.input_mode = InputMode::Normal; // Return to normal mode after submit
 
         event_to_send // Return the event for the main loop
     }
-}
 
-/// Implements the rendering logic for the `App` state using Ratatui.
-impl Widget for &App {
-    fn render(self, area: Rect, buf: &mut Buffer) {
-        // Style for focused vs unfocused panes
+    // --- Rendering Helper Functions ---
+
+    /// Renders the console pane (log and input).
+    fn render_console_pane(&self, area: Rect, buf: &mut Buffer) {
         let focused_style = Style::default().fg(Color::Yellow);
         let unfocused_style = Style::default();
 
-        // --- Overall Layout (Left: Chat/Console, Right: Users) ---
-        let main_chunks = Layout::horizontal([
-            Constraint::Percentage(75), // Left side (Chat + Console)
-            Constraint::Percentage(25), // Right side (Users List)
-        ])
-        .split(area);
-
-        let left_area = main_chunks[0];
-        let right_area = main_chunks[1];
-
-        // --- Left Side Layout (Top: Chat, Bottom: Console) ---
-        let left_chunks = Layout::vertical([
-            Constraint::Percentage(67), // Top: Chat (approx 2/3)
-            Constraint::Percentage(33), // Bottom: Console (approx 1/3)
-        ])
-        .split(left_area);
-
-        let chat_area = left_chunks[0];
-        let console_area = left_chunks[1];
-
-        // --- Placeholder: Users List ---
-        let users_block = Block::bordered()
-            .title(" Users ".bold())
-            .border_set(border::THICK)
-            .border_style(if self.focused_pane == FocusPane::UsersList { focused_style } else { unfocused_style });
-        users_block.render(right_area, buf);
-        // TODO: Render actual user list inside users_block.inner(right_area)
-
-
-        // --- Placeholder: Chat ---
-        let chat_title = " Global Chat ".bold();
-        let chat_block = Block::bordered()
-            .title(chat_title)
-            .border_set(border::THICK)
-            .border_style(if self.focused_pane == FocusPane::Chat { focused_style } else { unfocused_style });
-        chat_block.render(chat_area, buf);
-        // TODO: Render chat messages inside chat_block.inner(chat_area)
-
-
-        // --- Console Panel (Adapted from previous main block) ---
         let console_title_bottom = match self.input_mode {
-            InputMode::Normal => " Focus: Tab | Scroll: ↑/↓ | Quit: Ctrl+Q ".bold(), // Updated hint
+            InputMode::Normal => " Focus: Tab | Scroll: ↑/↓ | Quit: Ctrl+Q ".bold(),
             InputMode::Editing => " Submit: Enter | Cancel: Esc ".bold(),
         };
         let console_block = Block::bordered()
@@ -346,7 +211,7 @@ impl Widget for &App {
             .border_style(if self.focused_pane == FocusPane::Console { focused_style } else { unfocused_style });
 
         // Layout within the console block (Log + Input)
-        let console_inner_area = console_block.inner(console_area);
+        let console_inner_area = console_block.inner(area);
         let console_chunks = Layout::vertical([
             Constraint::Min(1),
             Constraint::Length(3),
@@ -357,7 +222,7 @@ impl Widget for &App {
         let input_area = console_chunks[1];
 
         // Render the console block border first
-        console_block.render(console_area, buf);
+        console_block.render(area, buf);
 
         // Render Log Panel within its area
         let log_text = Text::from(
@@ -378,18 +243,58 @@ impl Widget for &App {
             })
             .block(Block::bordered().title(" Input (/)"));
         input_paragraph.render(input_area, buf);
+    }
 
+    /// Renders the users list pane.
+    fn render_users_pane(&self, area: Rect, buf: &mut Buffer) {
+        let focused_style = Style::default().fg(Color::Yellow);
+        let unfocused_style = Style::default();
 
-        // --- Cursor ---
-        // Set cursor position only when in editing mode and within the input area
-        match self.input_mode {
-            InputMode::Normal => {} // No cursor in normal mode
-            #[allow(clippy::cast_possible_truncation)]
-            InputMode::Editing => {
-                // Make sure cursor isn't rendered outside the visible input box
-                // The actual cursor setting happens in main.rs using f.set_cursor()
-            }
-        }
+        let users_block = Block::bordered()
+            .title(" Users ".bold())
+            .border_set(border::THICK)
+            .border_style(if self.focused_pane == FocusPane::UsersList { focused_style } else { unfocused_style });
+
+        let inner_area = users_block.inner(area);
+        users_block.render(area, buf);
+
+        // TODO: Render actual user list inside inner_area
+        let placeholder_text = Paragraph::new("User list coming soon...");
+        placeholder_text.render(inner_area, buf);
+    }
+
+    /// Renders the chat pane.
+    fn render_chat_pane(&self, area: Rect, buf: &mut Buffer) {
+        let focused_style = Style::default().fg(Color::Yellow);
+        let unfocused_style = Style::default();
+
+        let chat_title = " Global Chat ".bold();
+        let chat_block = Block::bordered()
+            .title(chat_title)
+            .border_set(border::THICK)
+            .border_style(if self.focused_pane == FocusPane::Chat { focused_style } else { unfocused_style });
+
+        let inner_area = chat_block.inner(area);
+        chat_block.render(area, buf);
+
+        // TODO: Render chat messages inside inner_area
+        let placeholder_text = Paragraph::new("Chat messages coming soon...");
+        placeholder_text.render(inner_area, buf);
+    }
+}
+
+/// Implements the rendering logic for the `App` state using Ratatui.
+impl Widget for &App {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        // Compute layout areas
+        let (chat_area, console_area, users_area) = layout_chunks(area);
+
+        // --- Render Panes using Helper Functions ---
+        self.render_chat_pane(chat_area, buf);
+        self.render_console_pane(console_area, buf);
+        self.render_users_pane(users_area, buf);
+
+        // Note: Cursor setting logic remains in main.rs as it requires the `Frame` (`f`).
     }
 }
 
@@ -406,4 +311,24 @@ pub enum AppEvent {
     LogMessage(String),
     /// User command to quit the application.
     Quit,
+}
+
+// Computes the layout rectangles for the chat, console, and users list.
+pub fn layout_chunks(area: Rect) -> (Rect, Rect, Rect) {
+    let main_chunks = Layout::horizontal([
+        Constraint::Percentage(75),
+        Constraint::Percentage(25),
+    ])
+    .split(area);
+    let left_area = main_chunks[0];
+    let users_area = main_chunks[1];
+
+    let left_chunks = Layout::vertical([
+        Constraint::Percentage(67),
+        Constraint::Percentage(33),
+    ])
+    .split(left_area);
+    let chat_area = left_chunks[0];
+    let console_area = left_chunks[1];
+    (chat_area, console_area, users_area)
 }

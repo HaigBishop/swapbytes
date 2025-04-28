@@ -26,7 +26,8 @@ use ratatui::{
 // Local modules
 mod tui;
 mod utils;
-use tui::{App, AppEvent, InputMode, FocusPane};
+mod commands;
+use tui::{App, AppEvent, InputMode, FocusPane, layout_chunks};
 
 /// Entry point: sets up TUI, libp2p, and event loop.
 #[tokio::main]
@@ -137,20 +138,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 // This draws everything EXCEPT the stateful scrollbar
                 f.render_widget(&app, f.area());
 
-                // --- Calculate Console Log Area (needs to match tui.rs layout) --- 
-                // This is slightly duplicated logic, but needed here to place the scrollbar
-                let main_chunks = Layout::horizontal([
-                    Constraint::Percentage(75), 
-                    Constraint::Percentage(25),
-                ])
-                .split(f.area());
-                let left_area = main_chunks[0];
-                let left_chunks = Layout::vertical([
-                    Constraint::Percentage(67),
-                    Constraint::Percentage(33),
-                ])
-                .split(left_area);
-                let console_area = left_chunks[1];
+                // Calculate Console Log Area using layout_chunks helper
+                let (_chat_area, console_area, _users_area) = layout_chunks(f.area());
+
                 let console_block = Block::bordered().border_set(symbols::border::THICK);
                 let console_inner_area = console_block.inner(console_area);
                 let console_chunks = Layout::vertical([

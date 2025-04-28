@@ -45,7 +45,6 @@ It satisfies all baseline requirements for COSC 473 A2 and adds a polished text-
 | **Directory Safety** | User-chosen **output directory** validated at startup and via `/setdir`. |
 | **Duplicate Nickname Guard** | Allowed, but each peer gets a warning if a clash is detected. |
 | **Auto + Manual Discovery** | mDNS; manual `/connect <peerID>` is also supported. |
-| **Reset Workflow** | `/reset` drops state and re-runs the initial join wizard. |
 | **Help Anywhere** | `/help` prints concise command help. |
 
 ---
@@ -102,7 +101,6 @@ It satisfies all baseline requirements for COSC 473 A2 and adds a polished text-
 
 
 
-
 ---
 
 ## Command Reference
@@ -120,8 +118,7 @@ It satisfies all baseline requirements for COSC 473 A2 and adds a polished text-
 | `/setdir <path>` | global | Change download directory (validated absolute path). |
 | `/setname <name>` | global | Change nickname (validated). |
 | `/me`           | global       | Show information about you (addrs, nickname, etc.)   |
-| `/reset`          | global       | Wipe runtime state and restart the join wizard.              |
-| `/quit`           | global       | Quit the application                                         |
+| `/quit`           | global       | Quit the application    |
 
 ---
 
@@ -181,14 +178,6 @@ cargo build --release   # target/release/swapbytes
   --dir ~/Downloads/swapbytes_bob
 ```
 
-#### CLI Flags
-
-| Flag | Default | Purpose |
-|------|---------|---------|
-| `--nick <name>` | prompt | Set nickname non-interactively. |
-| `--dir <path>` | prompt | Set download directory non-interactively. |
-| `--bootstrap <bool>` | `true` | Enable mDNS discovery (LAN). |
-
 ---
 
 ## Examples
@@ -205,7 +194,6 @@ bob is now invisible to others.
 bob> /show
 bob is visible again.
 
-bob> /reset   # re-run join wizard
 ```
 
 ---

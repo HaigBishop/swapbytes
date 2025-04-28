@@ -78,6 +78,7 @@ pub fn verify_download_directory(path_str: &str) -> Result<PathBuf, String> {
 /// Checks:
 /// 1. Length is between 3 and 16 characters (inclusive).
 /// 2. Contains only allowed characters: a-z, A-Z, 0-9, -, _
+/// 3. Must not be "global" or "Global"
 ///
 /// Returns `Ok(String)` with the validated nickname on success,
 /// or `Err(String)` with a descriptive error message on failure.
@@ -92,7 +93,10 @@ pub fn verify_nickname(name: &str) -> Result<String, String> {
         return Err("Name must only contain: a-z, A-Z, 0-9, -, and _.".to_string());
     }
 
-    // TODO: Add check for nickname uniqueness (requires network state)
+    // 3. Check for "global" or "Global"
+    if name.eq_ignore_ascii_case("global") {
+        return Err("Nickname cannot be 'global'.".to_string());
+    }
 
     Ok(name.to_string())
-} 
+}

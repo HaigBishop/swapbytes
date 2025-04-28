@@ -46,6 +46,13 @@ pub enum FocusPane {
     UsersList,
 }
 
+/// Represents the current chat context (Global or Private).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChatContext {
+    Global,
+    Private { target_peer_id: PeerId, target_nickname: Option<String> },
+}
+
 /// Represents the online status of a peer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OnlineStatus {
@@ -100,6 +107,8 @@ pub struct App {
     pub ping_start_time: Option<Instant>,
     /// Flag indicating if the user wants to be perceived as online.
     pub is_visible: bool,
+    /// The current chat context (global or private).
+    pub current_chat_context: ChatContext,
 }
 
 impl Default for App {
@@ -129,6 +138,7 @@ impl Default for App {
             pinging: false, // Initialize pinging state
             ping_start_time: None, // Initialize ping start time
             is_visible: true, // User is visible by default
+            current_chat_context: ChatContext::Global, // Default to global chat
         }
     }
 }
@@ -422,7 +432,14 @@ impl App {
         let unfocused_style = Style::default();
         let is_focused = self.focused_pane == FocusPane::Chat;
 
-        let chat_title = " Global Chat ".bold();
+        // Determine chat title based on context
+        let chat_title_text = match &self.current_chat_context {
+            ChatContext::Global => " Global Chat ".to_string(),
+            ChatContext::Private { target_nickname: Some(nick), .. } => format!(" Private Chat ({}) ", nick),
+            ChatContext::Private { .. } => " Private Chat (Unknown User) ".to_string(), // Use "Unknown User" if nickname is None
+        };
+        let chat_title = chat_title_text.bold();
+
         let chat_block = Block::bordered()
             .title(chat_title)
             .border_set(border::THICK)

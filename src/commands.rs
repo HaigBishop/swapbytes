@@ -1,5 +1,5 @@
-use crate::tui::{App, AppEvent};
-use libp2p::Multiaddr;
+use crate::tui::{App, AppEvent, ChatContext, FocusPane, InputMode};
+use libp2p::{Multiaddr, PeerId};
 use std::time::Instant;
 
 /// Processes a user command input.
@@ -106,6 +106,64 @@ pub fn process_command(command_input: &str, app: &mut App) -> Option<AppEvent> {
                 }
             }
         }
+        "chat" => {
+            if args.is_empty() {
+                app.push("Usage: /chat <nickname|global>".to_string());
+            } else if args.eq_ignore_ascii_case("global") {
+                // Switch to Global Chat
+                app.current_chat_context = ChatContext::Global;
+                app.push("Switched to global chat.".to_string());
+                // Focus chat pane and enter chat mode
+                app.focused_pane = FocusPane::Chat;
+                app.input_mode = InputMode::Chat;
+                app.chat_input.clear();
+                app.reset_chat_cursor();
+            } else {
+                // Try to find peer by nickname (case-insensitive)
+                let target_name_lower = args.to_lowercase();
+                let matches: Vec<(PeerId, Option<String>)> = app
+                    .peers
+                    .iter()
+                    .filter_map(|(id, info)| {
+                        info.nickname
+                            .as_ref()
+                            .filter(|nick| nick.to_lowercase() == target_name_lower)
+                            .map(|nick| (*id, Some(nick.clone())))
+                    })
+                    .collect();
+
+                match matches.len() {
+                    0 => {
+                        app.push(format!("Error: User '{}' not found.", args));
+                    }
+                    1 => {
+                        // Exactly one match
+                        let (peer_id, nickname) = matches.into_iter().next().unwrap();
+                        let display_name = nickname.clone().unwrap_or_else(|| "Unknown User".to_string());
+                        app.current_chat_context = ChatContext::Private { target_peer_id: peer_id, target_nickname: nickname };
+                        app.push(format!("Switched chat to {}", display_name));
+                        // Focus chat pane and enter chat mode
+                        app.focused_pane = FocusPane::Chat;
+                        app.input_mode = InputMode::Chat;
+                        app.chat_input.clear();
+                        app.reset_chat_cursor();
+                    }
+                    _ => {
+                        // Multiple matches, pick the first and warn
+                        app.push(format!("Warning: Multiple users found matching '{}'. Connecting to the first one.", args));
+                        let (peer_id, nickname) = matches.into_iter().next().unwrap();
+                        let display_name = nickname.clone().unwrap_or_else(|| "Unknown User".to_string());
+                        app.current_chat_context = ChatContext::Private { target_peer_id: peer_id, target_nickname: nickname };
+                        app.push(format!("Switched chat to {}", display_name));
+                        // Focus chat pane and enter chat mode
+                        app.focused_pane = FocusPane::Chat;
+                        app.input_mode = InputMode::Chat;
+                        app.chat_input.clear();
+                        app.reset_chat_cursor();
+                    }
+                }
+            }
+        }
         "hide" => {
             if app.is_visible {
                 app.is_visible = false;
@@ -132,6 +190,7 @@ pub fn process_command(command_input: &str, app: &mut App) -> Option<AppEvent> {
             app.push("  /me               - Show my info (addrs, dir, nickname).".to_string());
             app.push("  /setdir <path>    - Set the absolute path for downloads.".to_string());
             app.push("  /setname <name>   - Set your nickname (3-16 chars, a-z, A-Z, 0-9, -, _).".to_string());
+            app.push("  /chat <name>      - Switch chat (e.g. 'bob' or 'global').".to_string());
             app.push("  /ping <multiaddr> - Ping a peer.".to_string());
             app.push("  /hide             - Set your status to appear offline.".to_string());
             app.push("  /show             - Set your status to appear online.".to_string());

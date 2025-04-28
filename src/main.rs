@@ -294,10 +294,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 // Update scrollbar state stored in app (ensure content len & viewport are correct)
                 app.console_viewport_height = log_area.height as usize;
 
-                // --- Set cursor position (only in Editing mode) ---
+                // --- Set cursor position (only in Command mode) ---
                 match app.input_mode {
                     InputMode::Normal => {} // Cursor hidden by default
-                    InputMode::Editing => {
+                    InputMode::Command => {
                         // Input area calculation (already done above for scrollbar)
                         let input_area = console_chunks[1];
                         f.set_cursor_position(Position::new(
@@ -456,6 +456,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                     if key.kind == KeyEventKind::Press {
                                         match key.code {
                                             // Focus Switching
+                                            // (if user hits Tab)
                                             KeyCode::Tab => {
                                                 app.focused_pane = match app.focused_pane {
                                                     FocusPane::Chat => FocusPane::Console,
@@ -464,15 +465,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                                 };
                                                 redraw = true;
                                             }
-                                            // Enter Editing Mode
-                                            KeyCode::Char('/') => {
-                                                app.input_mode = InputMode::Editing;
+                                            // Enter Command Mode 
+                                            // (if user hits / and Console focused)
+                                            KeyCode::Char('/') if app.focused_pane == FocusPane::Console => {
+                                                app.input_mode = InputMode::Command;
                                                 app.input.clear();
                                                 app.input.push('/');
                                                 app.cursor_position = 1;
                                                 redraw = true;
                                             }
-                                            // Scrolling (only if Console focused)
+                                            // Scrolling 
+                                            // (if user hits Up or Down and Console focused)
                                             KeyCode::Up if app.focused_pane == FocusPane::Console => {
                                                 app.console_scroll = app.console_scroll.saturating_sub(1);
                                                 redraw = true;
@@ -486,7 +489,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                         }
                                     }
                                 }
-                                InputMode::Editing => {
+                                InputMode::Command => {
                                     if key.kind == KeyEventKind::Press {
                                         match key.code {
                                             KeyCode::Enter => {
@@ -542,7 +545,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                                 app.reset_cursor();
                                                 redraw = true;
                                             }
-                                            _ => {} // Ignore other keys in editing mode
+                                            _ => {} // Ignore other keys in Command mode
                                         }
                                     }
                                 }
@@ -584,7 +587,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             // Optionally log if the peer wasn't found, but for now, just ignore it.
                         }
                         AppEvent::Dial(_) => {} // Handled by swarm task
-                        AppEvent::Quit => {} // Already handled in Editing mode Enter
+                        AppEvent::Quit => {} // Already handled in Command mode Enter
                         AppEvent::VisibilityChanged(_) => {} // Handled by swarm task
                     }
                 } else {

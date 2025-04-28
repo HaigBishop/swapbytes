@@ -33,7 +33,7 @@ pub const PINGING_DURATION: Duration = Duration::from_millis(2000);
 pub enum InputMode {
     #[default]
     Normal,
-    Editing,
+    Command,
 }
 
 /// Represents the currently focused UI pane.
@@ -246,7 +246,7 @@ impl App {
 
         let console_title_bottom = match self.input_mode {
             InputMode::Normal => " Focus: Tab | Scroll: ↑/↓ | Quit: Ctrl+Q ".bold(),
-            InputMode::Editing => " Submit: Enter | Cancel: Esc ".bold(),
+            InputMode::Command => " Submit: Enter | Cancel: Esc ".bold(),
         };
         let console_block = Block::bordered()
             .title(" Console ".bold())
@@ -288,7 +288,7 @@ impl App {
         let input_paragraph = Paragraph::new(self.input.as_str())
             .style(match self.input_mode {
                 InputMode::Normal => Style::default(),
-                InputMode::Editing => Style::default().fg(Color::Yellow),
+                InputMode::Command => Style::default().fg(Color::Yellow),
             })
             .block(Block::bordered().title(input_title.bold())); // Use dynamic title
         input_paragraph.render(input_area, buf);

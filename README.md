@@ -35,17 +35,30 @@ It satisfies all baseline requirements for COSC 473 A2 and adds a polished text-
 
 ## Key Features
 
-| Category | Details |
+| Feature | Details |
 |----------|---------|
+| **User List** | Sidebar showing nicknames **+ PeerIDs**. Online status auto-refreshes every 2-8s. |
 | **Global Chat** | Simple room where every message is broadcast. |
-| **Global User List** | Sidebar showing nicknames **+ PeerIDs**. Online status auto-refreshes every 5s. |
-| **Private Chats** | One-on-one pane for negotiation and file offers. |
-| **File Swapping** | `/offer <file>` → `/accept | /decline` → direct transfer (max 1 GB). |
+| **Private Chats** | One-on-one chat for negotiation and file offers. |
+| **File Swapping** | `/offer <file>` → `/accept | /decline` → direct transfer (max 100 MB). |
+| **Ergonomic TUI** | Cross-platform Text User Interface powered by `ratatui`. |
+| **Auto mDNS** | Automatic mDNS connection to peers. |
+| **Command Interface** | Simple slash-commands entered in the Console pane. |
+| **Heartbeat Mechanism** | Regular lightweight background messages announce presence (~2s); peers offline after ~8s inactivity. |
+
+## Extra Features
+
+| Feature | Details |
+|----------|---------|
 | **Visibility Controls** | `/hide` / `/show` toggles presence in the global list. |
 | **Directory Safety** | User-chosen **output directory** validated at startup and via `/setdir`. |
-| **Duplicate Nickname Guard** | Allowed, but each peer gets a warning if a clash is detected. |
-| **Auto + Manual Discovery** | mDNS; manual `/connect <peerID>` is also supported. |
-| **Help Anywhere** | `/help` prints concise command help. |
+| **Duplicate Nicknames** | Allowed, but each peer gets a warning if a clash is detected. |
+| **Help Command** | `/help` prints concise command help. |
+| **Direct Peer Interaction** | `/ping` command checks reachability and latency to specific peers. |
+| **Nickname Handling** | Default random name (`userXXXX`); allows user-set names; handles duplicates gracefully. |
+| **Self-Information** | `/me` command displays current addresses, PeerID, download directory, nickname, and visibility. |
+| **Graceful Exit** | Cleanly shut down the application using `Ctrl+Q` or `/quit`. |
+
 
 ---
 
@@ -54,50 +67,47 @@ It satisfies all baseline requirements for COSC 473 A2 and adds a polished text-
 **Global chat view:**
 ```
 ┌───────────────────────────────────────────────┬──────────────┐
-│               Global Chat 📣                  │  Users List  │
-│  [you] hello bob                              │  alice       │
-│  [bob] hey wanna trade?                       │  (7ifp9x)    │
-│  …                                            │  bob         │
-│                                               │  (s8sfk9)    │
-│                                               │  …           │
+│               Global Chat                     │ Users        │
+│  [you] hello bob                              │ alice (Fp9x) │
+│  [bob] hey wanna trade?                       │ bob (s8sF)   │
+│  …                                            │              │
+│                                               │              │
+│                                               │              │
 ├───────────────────────────────────────────────┤              │
-│               Console Pane ⌨️                 │              │
-│  > /offer draft.md                            │              │
+│               Console                         │              │
+│  > /chat bob                                  │              │
 └───────────────────────────────────────────────┴──────────────┘
 ```
 **Private chat view:**
 
 ```
 ┌───────────────────────────────────────────────┬──────────────┐
-│              Private Chat 🔐 (bob)            │  Users List  │
-│  [you ➜ bob] hi, yeah let's trade!            │  alice       │
-│  [bob] /offer notes.pdf                       │  (7ifp9x)    │
-│  >> Accept file notes.pdf?  (Y/N)             │  *bob*       │
-│  …                                            │  (s8sfk9)    │
-│                                               │  …           │
+│              Private Chat (bob)               │ Users        │
+│  [you] hi, yeah let's trade!                  │ alice (Fp9x) │
+│  [bob] /offer notes.pdf                       │ *bob* (s8sF) │
+│  >> Accept notes.pdf? (/accept or /decline)   │              │
+│                                               │              │
+│                                               │              │
 ├───────────────────────────────────────────────┤              │
-│               Console Pane ⌨️                 │              │
+│               Console                         │              │
 │  > /accept                                    │              │
 └───────────────────────────────────────────────┴──────────────┘
 ```
 
 #### TUI Panes
 - **Users List** 
-    - Occupies full height and 1/4 of width on the right side (scrollable)
     - Always visible, shows nickname + PeerIDs and online/offline status.  
     - Asterisk marks the peer whose chat is currently in view.
 - **Chat Pane**
-    - Occupies the top 3⁄4 of height of left side (scrollable)
     - Shows either: Global Chat or Private Chat
     - To enter Global Chat run `/global` or hit `ESC`
     - To enter Private Chat run `/chat <nickname>` or select a user in the Users List
 - **Console Pane**
-    - Occupies the bottom 1⁄4 of height of left side
     - Always visible, shows console output and online/offline status. 
 
 #### Trade offers
-- In a private chat, `/offer <file>` posts an interactive prompt (`Accept? Y/N`) inside the same pane.  
-- `/accept` or pressing **Y** begins the transfer; `/decline` or **N** cancels it.
+- In a private chat, `/offer <file>` posts an interactive prompt (`Accept?`) inside the same pane.  
+- `/accept` begins the transfer; `/decline` cancels it.
 
 
 
@@ -108,48 +118,29 @@ It satisfies all baseline requirements for COSC 473 A2 and adds a polished text-
 | Command | Scope | Description |
 |---------|-------|-------------|
 | `/help` | global | Print brief help. |
-| `/ping <peer>` | global | Ping a peer by `nickname`, `PeerID`, or `multiaddr`. |
+| `/setdir <path>` | global | Change download directory (validated absolute path). |
+| `/setname <name>` | global | Change nickname (validated). |
+| `/me`           | global       | Show information about you (addrs, nickname, etc.) |
+| `/chat <name>` | global | Switch chat to a user (e.g. `chat bob`) or global (`chat global`) |
 | `/offer <path>` | private chat | Propose a file swap in the current private chat . |
 | `/accept` | private chat | Accept the latest offer in the current private chat . |
 | `/decline` | private chat | Decline the latest offer in the current private chat . |
-| `/connect <peer>` | global | Manually dial a peer by`nickname`, `PeerID`, or `multiaddr`. |
-| `/refresh` | global | Force immediate peer discovery refresh. |
 | `/hide` / `/show` | global | Toggle your visibility in the Global User List. |
-| `/setdir <path>` | global | Change download directory (validated absolute path). |
-| `/setname <name>` | global | Change nickname (validated). |
-| `/me`           | global       | Show information about you (addrs, nickname, etc.)   |
+| `/ping <multiaddr>` | global | Ping a peer by `multiaddr`. |
 | `/quit`           | global       | Quit the application    |
 
 ---
 
 ## Startup & Peer Discovery Flow
 
-1. **Join Wizard**  
-   1. Prompt for **nickname**.  
-   2. Prompt for **download directory** – must exist & be writable.  
-   3. Connect to **mDNS**.
-   4. Default **visibility ON**; first heartbeat sent immediately.
+1. **Start-up**  
+   1. Uh..
+   2. Default **visibility ON**; first heartbeat sent immediately.
 
 2. **Heartbeat**  
-   - Every 5s a lightweight pub-sub (gossipsub) ping announces presence.  
-   - Peers missing > 10s marked **offline**.
+   - Every 2s a lightweight pub-sub (gossipsub) ping announces presence.  
+   - Peers missing > 8s marked **offline**.
 
-3. **Auto-Refresh**  
-   - Discovery refresh runs silently every 60 s.  
-   - `/refresh` triggers the same logic manually.
-
----
-
-## Error Handling & Edge Cases
-
-| Scenario | Behaviour |
-|----------|-----------|
-| `nickname` clash | Allowed, but both peers print a warning. |
-| File does not exist | Offer rejected, requester notified. |
-| File > 1 GB | Offer rejected, sender notified. |
-| Transfer failure / disconnect | Both peers see **"File transfer failed – please retry."** |
-| Invalid download dir | App blocks until a valid, writable path is provided. |
-| Path traversal attempt (`../../`) | Offer rejected for safety. |
 
 ---
 
@@ -159,41 +150,11 @@ It satisfies all baseline requirements for COSC 473 A2 and adds a polished text-
 
 ```bash
 # Clone
-git clone https://github.com/your-user/swapbytes.git
+git clone https://github.com/HaigBishop/swapbytes.git
 cd swapbytes
 
-# Build release binary
-cargo build --release   # target/release/swapbytes
-```
-
-### Quick Start (2 local terminals)
-
-```bash
-# Terminal A:
-./target/release/swapbytes --nick alice \
-  --dir ~/Downloads/swapbytes_alice --bootstrap true
-
-# Terminal B:
-./target/release/swapbytes --nick bob \
-  --dir ~/Downloads/swapbytes_bob
-```
-
----
-
-## Examples
-
-```
-bob> /offer notes_week4.pdf
-alice> /accept
-[transfer starts: 142 KB]
-[transfer complete ✓]
-
-bob> /hide
-bob is now invisible to others.
-
-bob> /show
-bob is visible again.
-
+# Run
+cargo run
 ```
 
 ---

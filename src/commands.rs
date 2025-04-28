@@ -90,8 +90,13 @@ pub fn process_command(command_input: &str, app: &mut App) -> Option<AppEvent> {
                 // Call the verification function from utils
                 match crate::utils::verify_nickname(args) {
                     Ok(verified_name) => {
+                        // Update the nickname in the UI
                         app.push(format!("Nickname set to: {}", verified_name));
                         app.nickname = Some(verified_name.clone());
+                        // If the nickname is already taken that is okay, but warn the user
+                        if app.peers.values().any(|peer| peer.nickname == Some(verified_name.clone())) {
+                            app.push(format!("Warning: Nickname '{}' is already taken by another user.", verified_name));
+                        }
                         // Send update event to swarm task
                         event_to_send = Some(AppEvent::NicknameUpdated(app.local_peer_id.unwrap(), verified_name));
                     }

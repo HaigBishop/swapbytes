@@ -29,11 +29,12 @@ use crate::behavior::SwapBytesBehaviourEvent;
 pub const PINGING_DURATION: Duration = Duration::from_millis(2000);
 
 /// Input modes for the TUI.
-#[derive(Debug, Default)]
+#[derive(Debug, Default, PartialEq, Eq)]
 pub enum InputMode {
     #[default]
     Normal,
     Command,
+    Chat,
 }
 
 /// Represents the currently focused UI pane.
@@ -65,10 +66,14 @@ pub struct PeerInfo {
 pub struct App {
     /// Log history (limited).
     pub log: Vec<String>,
-    /// Current value of the input box.
+    /// Current value of the command input box.
     pub input: String,
-    /// Position of cursor in the input box.
+    /// Position of cursor in the command input box.
     pub cursor_position: usize,
+    /// Current value of the chat input box.
+    pub chat_input: String,
+    /// Position of cursor in the chat input box.
+    pub chat_cursor_position: usize,
     /// Current input mode.
     pub input_mode: InputMode,
     /// Flag indicating if the application should exit.
@@ -109,6 +114,8 @@ impl Default for App {
             log: Vec::new(),
             input: String::new(),
             cursor_position: 0,
+            chat_input: String::new(),
+            chat_cursor_position: 0,
             input_mode: InputMode::default(),
             exit: false,
             focused_pane: FocusPane::default(),
@@ -237,6 +244,59 @@ impl App {
         event_to_send // Return the event for the main loop
     }
 
+    // --- Chat Input Methods ---
+
+    /// Moves the chat cursor one character to the left.
+    pub fn move_chat_cursor_left(&mut self) {
+        let cursor_moved_left = self.chat_cursor_position.saturating_sub(1);
+        self.chat_cursor_position = self.clamp_chat_cursor(cursor_moved_left);
+    }
+
+    /// Moves the chat cursor one character to the right.
+    pub fn move_chat_cursor_right(&mut self) {
+        let cursor_moved_right = self.chat_cursor_position.saturating_add(1);
+        self.chat_cursor_position = self.clamp_chat_cursor(cursor_moved_right);
+    }
+
+    /// Inserts a character at the current chat cursor position.
+    pub fn enter_chat_char(&mut self, new_char: char) {
+        let index = self.chat_byte_index();
+        self.chat_input.insert(index, new_char);
+        self.move_chat_cursor_right();
+    }
+
+    /// Deletes the character before the current chat cursor position.
+    pub fn delete_chat_char(&mut self) {
+        let is_not_cursor_leftmost = self.chat_cursor_position != 0;
+        if is_not_cursor_leftmost {
+            let current_index = self.chat_cursor_position;
+            let from_left_to_current_index = current_index - 1;
+            let before_char_to_delete = self.chat_input.chars().take(from_left_to_current_index);
+            let after_char_to_delete = self.chat_input.chars().skip(current_index);
+            self.chat_input = before_char_to_delete.chain(after_char_to_delete).collect();
+            self.move_chat_cursor_left();
+        }
+    }
+
+    /// Returns the byte index based on the chat character position for UTF-8 strings.
+    fn chat_byte_index(&self) -> usize {
+        self.chat_input
+            .char_indices()
+            .map(|(i, _)| i)
+            .nth(self.chat_cursor_position)
+            .unwrap_or(self.chat_input.len())
+    }
+
+    /// Clamps the chat cursor position within the bounds of the chat input string's characters.
+    fn clamp_chat_cursor(&self, new_cursor_pos: usize) -> usize {
+        new_cursor_pos.clamp(0, self.chat_input.chars().count())
+    }
+
+    /// Resets the chat cursor position to the beginning of the chat input string.
+    pub fn reset_chat_cursor(&mut self) {
+        self.chat_cursor_position = 0;
+    }
+
     // --- Rendering Helper Functions ---
 
     /// Renders the console pane (log and input).
@@ -247,6 +307,7 @@ impl App {
         let console_title_bottom = match self.input_mode {
             InputMode::Normal => " Focus: Tab | Scroll: ↑/↓ | Quit: Ctrl+Q ".bold(),
             InputMode::Command => " Submit: Enter | Cancel: Esc ".bold(),
+            InputMode::Chat => " Focus: Tab | Quit: Ctrl+Q ".bold(),
         };
         let console_block = Block::bordered()
             .title(" Console ".bold())
@@ -289,6 +350,7 @@ impl App {
             .style(match self.input_mode {
                 InputMode::Normal => Style::default(),
                 InputMode::Command => Style::default().fg(Color::Yellow),
+                InputMode::Chat => Style::default(),
             })
             .block(Block::bordered().title(input_title.bold())); // Use dynamic title
         input_paragraph.render(input_area, buf);
@@ -358,19 +420,39 @@ impl App {
     fn render_chat_pane(&self, area: Rect, buf: &mut Buffer) {
         let focused_style = Style::default().fg(Color::Yellow);
         let unfocused_style = Style::default();
+        let is_focused = self.focused_pane == FocusPane::Chat;
 
         let chat_title = " Global Chat ".bold();
         let chat_block = Block::bordered()
             .title(chat_title)
             .border_set(border::THICK)
-            .border_style(if self.focused_pane == FocusPane::Chat { focused_style } else { unfocused_style });
+            .border_style(if is_focused { focused_style } else { unfocused_style });
 
-        let inner_area = chat_block.inner(area);
-        chat_block.render(area, buf);
+        // Layout within the chat block (Messages + Input)
+        let chat_inner_area = chat_block.inner(area);
+        chat_block.render(area, buf); // Render block border first
 
-        // TODO: Render chat messages inside inner_area
+        let chat_chunks = Layout::vertical([
+            Constraint::Min(1),      // Area for messages
+            Constraint::Length(3), // Area for chat input box
+        ])
+        .split(chat_inner_area);
+
+        let messages_area = chat_chunks[0];
+        let input_area = chat_chunks[1];
+
+        // TODO: Render chat messages inside messages_area
         let placeholder_text = Paragraph::new("Chat messages coming soon...");
-        placeholder_text.render(inner_area, buf);
+        placeholder_text.render(messages_area, buf);
+
+        // Render Chat Input Box within its area
+        let chat_input_paragraph = Paragraph::new(self.chat_input.as_str())
+            .style(match self.input_mode {
+                InputMode::Chat => Style::default().fg(Color::Yellow), // Highlight when active
+                _ => Style::default(),
+            })
+            .block(Block::bordered().title(" Chat Input ".bold()));
+        chat_input_paragraph.render(input_area, buf);
     }
 }
 
@@ -406,6 +488,8 @@ pub enum AppEvent {
     PeerExpired(PeerId),
     /// User command to quit the application.
     Quit,
+    /// User submitted a chat message.
+    EnterChat(String),
     /// User nickname has been updated (sent from UI to Swarm task).
     NicknameUpdated(PeerId, String),
     /// User visibility has changed (sent from UI to Swarm task).

@@ -7,8 +7,6 @@
 ---
 
 ## To Do
-- console input only if focus on console
-- add Chat Input (just start typing) to Chat Pane
 - global chat
 - private chat
 - trade offer -> accept/decline

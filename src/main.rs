@@ -20,7 +20,6 @@ use crossterm::event;
 use crossterm::event::{KeyCode, KeyEventKind};
 use ratatui::{
     layout::{Constraint, Layout, Position},
-    symbols,
     widgets::Block,
 };
 
@@ -278,19 +277,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 // This draws everything EXCEPT the stateful scrollbar
                 f.render_widget(&app, f.area());
 
-                // Calculate Console Log Area using layout_chunks helper
-                let (_chat_area, console_area, _users_area) = layout_chunks(f.area());
+                // Calculate layout areas using layout_chunks helper
+                let (chat_area, console_area, _users_area) = layout_chunks(f.area());
 
-                let console_block = Block::bordered().border_set(symbols::border::THICK);
+                // --- Calculate Console Log Area for scrollbar ---
+                let console_block = Block::bordered(); // Temporary block for inner area calc
                 let console_inner_area = console_block.inner(console_area);
                 let console_chunks = Layout::vertical([
-                    Constraint::Min(1),
-                    Constraint::Length(3),
-                ])
-                .split(console_inner_area);
+                    Constraint::Min(1),      // Log area
+                    Constraint::Length(3), // Command input area
+                ]).split(console_inner_area);
                 let log_area = console_chunks[0];
 
-                // --- Render Console Scrollbar --- 
+                // --- Render Console Scrollbar ---
                 // Update scrollbar state stored in app (ensure content len & viewport are correct)
                 app.console_viewport_height = log_area.height as usize;
 
@@ -298,11 +297,27 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 match app.input_mode {
                     InputMode::Normal => {} // Cursor hidden by default
                     InputMode::Command => {
-                        // Input area calculation (already done above for scrollbar)
-                        let input_area = console_chunks[1];
+                        // Command Input area is the second chunk of the console layout
+                        let command_input_area = console_chunks[1];
                         f.set_cursor_position(Position::new(
-                            input_area.x + app.cursor_position as u16 + 1,
-                            input_area.y + 1,
+                            command_input_area.x + app.cursor_position as u16 + 1, // +1 for border
+                            command_input_area.y + 1, // +1 for border
+                        ));
+                    }
+                    InputMode::Chat => {
+                        // --- Calculate Chat Input Area for cursor ---
+                        let chat_block = Block::bordered(); // Temporary block for inner area calc
+                        let chat_inner_area = chat_block.inner(chat_area);
+                        let chat_chunks = Layout::vertical([
+                            Constraint::Min(1),      // Messages area
+                            Constraint::Length(3), // Chat input area
+                        ]).split(chat_inner_area);
+                        let chat_input_area = chat_chunks[1];
+
+                        // Set cursor for chat input
+                        f.set_cursor_position(Position::new(
+                            chat_input_area.x + app.chat_cursor_position as u16 + 1, // +1 for border
+                            chat_input_area.y + 1, // +1 for border
                         ));
                     }
                 }
@@ -310,7 +325,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             redraw = false;
         }
 
-        // --- Event Handling --- 
+        // --- Event Handling ---
         tokio::select! {
             // Handle events from Swarm or Keyboard tasks
             maybe_ev = rx.recv() => {
@@ -440,7 +455,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             redraw = true; // Redraw after any swarm event
                         }
                         AppEvent::Input(key) => {
-                            // Always handle Ctrl+q first
+                            // Handle Ctrl+q globally to quit
                             if key.kind == KeyEventKind::Press
                                 && key.code == KeyCode::Char('q')
                                 && key.modifiers.contains(event::KeyModifiers::CONTROL)
@@ -452,21 +467,20 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
                             // Handle based on input mode
                             match app.input_mode {
-                                InputMode::Normal => {
+                                InputMode::Normal => { // Normal mode: focus switching, command/chat entry
                                     if key.kind == KeyEventKind::Press {
                                         match key.code {
                                             // Focus Switching
                                             // (if user hits Tab)
                                             KeyCode::Tab => {
                                                 app.focused_pane = match app.focused_pane {
-                                                    FocusPane::Chat => FocusPane::Console,
-                                                    FocusPane::Console => FocusPane::UsersList,
+                                                    FocusPane::Console => FocusPane::UsersList, // Console -> Users
                                                     FocusPane::UsersList => FocusPane::Chat,
+                                                    FocusPane::Chat => FocusPane::Console, // Chat -> Console
                                                 };
                                                 redraw = true;
                                             }
-                                            // Enter Command Mode 
-                                            // (if user hits / and Console focused)
+                                            // Enter Command Mode (if user hits / and Console focused)
                                             KeyCode::Char('/') if app.focused_pane == FocusPane::Console => {
                                                 app.input_mode = InputMode::Command;
                                                 app.input.clear();
@@ -474,8 +488,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                                 app.cursor_position = 1;
                                                 redraw = true;
                                             }
-                                            // Scrolling 
-                                            // (if user hits Up or Down and Console focused)
+                                            // Console Scrolling (Up/Down)
                                             KeyCode::Up if app.focused_pane == FocusPane::Console => {
                                                 app.console_scroll = app.console_scroll.saturating_sub(1);
                                                 redraw = true;
@@ -485,11 +498,20 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                                 app.console_scroll = app.console_scroll.saturating_add(1).min(max_scroll);
                                                 redraw = true;
                                             }
+                                            // Enter Chat Mode (if any char pressed and Chat focused)
+                                            // Exclude Tab and potentially other control keys if needed
+                                            KeyCode::Char(c) if app.focused_pane == FocusPane::Chat => {
+                                                app.input_mode = InputMode::Chat;
+                                                app.chat_input.clear();
+                                                app.reset_chat_cursor();
+                                                app.enter_chat_char(c);
+                                                redraw = true;
+                                            }
                                             _ => {} // Ignore other keys in normal mode
                                         }
                                     }
                                 }
-                                InputMode::Command => {
+                                InputMode::Command => { // Command mode: handle command input
                                     if key.kind == KeyEventKind::Press {
                                         match key.code {
                                             KeyCode::Enter => {
@@ -549,6 +571,52 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                         }
                                     }
                                 }
+                                InputMode::Chat => { // Chat mode: handle chat input
+                                    if key.kind == KeyEventKind::Press {
+                                        match key.code {
+                                            KeyCode::Enter => {
+                                                // Send EnterChat event with current input
+                                                let _ = tx.send(AppEvent::EnterChat(app.chat_input.clone()));
+                                                // Clear input and return to normal mode
+                                                app.chat_input.clear();
+                                                app.reset_chat_cursor();
+                                                app.input_mode = InputMode::Normal;
+                                                redraw = true;
+                                            }
+                                            KeyCode::Char(to_insert) => {
+                                                app.enter_chat_char(to_insert);
+                                                redraw = true;
+                                            }
+                                            KeyCode::Backspace => {
+                                                app.delete_chat_char();
+                                                redraw = true;
+                                            }
+                                            KeyCode::Left => {
+                                                app.move_chat_cursor_left();
+                                                redraw = true;
+                                            }
+                                            KeyCode::Right => {
+                                                app.move_chat_cursor_right();
+                                                redraw = true;
+                                            }
+                                            KeyCode::Esc => {
+                                                // Exit chat mode without sending
+                                                app.input_mode = InputMode::Normal;
+                                                app.chat_input.clear();
+                                                app.reset_chat_cursor();
+                                                redraw = true;
+                                            }
+                                            KeyCode::Tab => {
+                                                // Exit chat mode, stay in chat focus
+                                                app.input_mode = InputMode::Normal;
+                                                app.chat_input.clear();
+                                                app.reset_chat_cursor();
+                                                redraw = true;
+                                            }
+                                            _ => {} // Ignore other keys in Chat mode
+                                        }
+                                    }
+                                }
                             }
                         }
                         AppEvent::LogMessage(msg) => {
@@ -589,6 +657,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         AppEvent::Dial(_) => {} // Handled by swarm task
                         AppEvent::Quit => {} // Already handled in Command mode Enter
                         AppEvent::VisibilityChanged(_) => {} // Handled by swarm task
+                        AppEvent::EnterChat(msg) => {
+                            // Handle submitting a chat message
+                            // For now, just log it to the console
+                            // TODO: Send this message over gossipsub
+                            app.push(format!("[CHAT SUBMITTED] {}", msg));
+                            redraw = true;
+                        }
                     }
                 } else {
                     // Channel closed, exit

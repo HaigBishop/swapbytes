@@ -89,8 +89,9 @@ pub fn process_command(command_input: &str, app: &mut App) -> Option<AppEvent> {
                 match crate::utils::verify_nickname(args) {
                     Ok(verified_name) => {
                         app.push(format!("Nickname set to: {}", verified_name));
-                        app.nickname = Some(verified_name);
-                        // TODO: Broadcast nickname change to network
+                        app.nickname = Some(verified_name.clone());
+                        // Send update event to swarm task
+                        event_to_send = Some(AppEvent::NicknameUpdated(app.local_peer_id.unwrap(), verified_name));
                     }
                     Err(err_msg) => {
                         app.push(format!("Error setting nickname: {}", err_msg));

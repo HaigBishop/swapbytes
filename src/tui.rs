@@ -18,6 +18,7 @@ use std::path::PathBuf;
 use std::collections::HashMap;
 use std::time::Instant;
 use std::time::Duration;
+use rand::Rng;
 
 // libp2p imports
 use libp2p::swarm::SwarmEvent;
@@ -96,6 +97,12 @@ pub struct App {
 
 impl Default for App {
     fn default() -> Self {
+        // Generate a username with a random 4-digit number
+        // e.g. user9350
+        let mut rng = rand::thread_rng();
+        let random_number: u16 = rng.gen_range(0..10000);
+        let nickname = format!("user{:04}", random_number);
+
         App {
             log: Vec::new(),
             input: String::new(),
@@ -107,7 +114,7 @@ impl Default for App {
             console_viewport_height: 2, // default minimal height
             listening_addresses: Vec::new(), // Initialize empty list
             download_dir: None, // Initialize as None
-            nickname: None, // Initialize nickname as None
+            nickname: Some(nickname), // Initialize nickname with random user string
             local_peer_id: None, // Initialize PeerId as None
             peers: HashMap::new(), // Initialize empty peers map
             pinging: false, // Initialize pinging state
@@ -305,16 +312,17 @@ impl App {
         sorted_peers.sort_by_key(|(id, _)| id.to_base58());
 
         for (peer_id, peer_info) in sorted_peers {
-            // Determine the display name: Use the nickname if available,
-            // otherwise show "No-Name" followed by the last 6 chars of the PeerId.
-            // Nicknames will be populated later via Gossipsub messages.
-            let display_name = peer_info.nickname.clone().unwrap_or_else(|| {
-                let id_str = peer_id.to_base58();
-                let len = id_str.len();
-                // Ensure we don't panic if the id_str is unexpectedly short
-                let start_index = len.saturating_sub(6); // Get index 6 chars from the end, or 0 if too short
-                format!("No-Name (...{})", &id_str[start_index..])
-            });
+            // Always include the last 6 chars of the PeerId
+            let id_str = peer_id.to_base58();
+            let len = id_str.len();
+            let start_index = len.saturating_sub(6);
+            let id_suffix = format!("(...{})", &id_str[start_index..]);
+
+            // Prepend nickname or "Unknown User" is the nickname is not known
+            let display_name = match &peer_info.nickname {
+                Some(nickname) => format!("{} {}", nickname, id_suffix),
+                None => format!("Unknown User {}", id_suffix),
+            };
 
             // Style the status prefix based on whether the peer is Online or Offline.
             let status_style = match peer_info.status {
@@ -395,6 +403,8 @@ pub enum AppEvent {
     PeerExpired(PeerId),
     /// User command to quit the application.
     Quit,
+    /// User nickname has been updated (sent from UI to Swarm task).
+    NicknameUpdated(PeerId, String),
 }
 
 // Computes the layout rectangles for the chat, console, and users list.

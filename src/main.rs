@@ -40,19 +40,25 @@ const SWAPBYTES_TOPIC: &str = "swapbytes-global-chat";
 /// Interval for sending heartbeats
 const HEARTBEAT_INTERVAL_SECS: u64 = 5;
 /// Timeout duration for marking peers offline
-const PEER_TIMEOUT_SECS: u64 = 10;
+const PEER_TIMEOUT_SECS: u64 = 17;
 
 // --- Define Message Types ---
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(tag = "type")] // Use a 'type' field to distinguish message types
 enum Message {
-    Heartbeat { timestamp_ms: u64 }, // Add timestamp field
+    Heartbeat {
+        timestamp_ms: u64, // Add timestamp field
+        nickname: Option<String>, // Add optional nickname
+    },
     // Add other message types like Chat, NicknameUpdate later
 }
 
 /// Entry point: sets up TUI, libp2p, and event loop.
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
+
+    // --- Initialize App State ---
+    let mut app = App::default();
 
     // --- Terminal UI setup ---
     let mut terminal = ratatui::init();
@@ -61,7 +67,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // --- Generate Identity ---
     let local_key = identity::Keypair::generate_ed25519();
     let local_peer_id = PeerId::from(local_key.public());
-    println!("Local Peer ID: {}", local_peer_id);
 
     // --- Event channel and cancellation token ---
     // Used to communicate between background tasks and the UI loop.
@@ -98,9 +103,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
     // --- Background task: forward swarm events to UI ----
     let swarm_tx = tx.clone(); // For Swarm->UI events
     let swarm_cancel = cancel.clone();
+    // Capture initial nickname for the swarm task
+    let initial_nickname = app.nickname.clone();
     tokio::spawn(async move {
         // Swarm task owns swarm and swarm_tx
         let mut swarm = swarm;
+        // Store the current nickname locally within the swarm task
+        let mut current_nickname = initial_nickname;
         // Heartbeat interval timer
         let mut heartbeat_timer = interval(Duration::from_secs(HEARTBEAT_INTERVAL_SECS));
         // Define the topic here once
@@ -118,7 +127,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         .expect("Time went backwards")
                         .as_millis() as u64; // Use u64
 
-                    let heartbeat_msg = Message::Heartbeat { timestamp_ms };
+                    let heartbeat_msg = Message::Heartbeat {
+                        timestamp_ms,
+                        nickname: current_nickname.clone(), // Use the task's nickname
+                    };
 
                     match serde_json::to_vec(&heartbeat_msg) {
                         Ok(encoded_msg) => {
@@ -147,6 +159,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             };
                             // Send log message back to UI
                             let _ = swarm_tx.send(AppEvent::LogMessage(log_msg));
+                        }
+                        // Handle nickname updates from the UI/commands
+                        AppEvent::NicknameUpdated(_peer_id, nickname) => {
+                            // Update the nickname stored within the swarm task
+                            current_nickname = Some(nickname);
                         }
                         // Ignore other commands if any were sent here by mistake
                         _ => {}
@@ -213,7 +230,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
 
     // --- Application state and main event loop ---
-    let mut app = App::default();
     app.local_peer_id = Some(local_peer_id);
     app.push("Welcome to SwapBytes!".to_string());
     app.push("Run /help to get started.".to_string());
@@ -331,19 +347,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                         message,
                                     })
                                 ) => {
-                                    // Log raw message for now (can be removed later)
-                                    // app.push(format!(
-                                    //     "Gossipsub Message: '{}' (ID: {id}) from {peer_id}",
-                                    //     String::from_utf8_lossy(&message.data),
-                                    // ));
-
-                                    // Avoud unused warning
+                                    // Use `propagation_source` (peer_id) to update the status of the *forwarding* peer.
+                                    let forwarder_peer_id = peer_id;
+                                    // Avoid the unused warnings
                                     let _ = id;
-                                    let _ = message;
 
-                                    // --- Update peer status on any message ---
+                                    // Update the forwarder's status/last_seen
                                     let now = Instant::now();
-                                    let peer_info = app.peers.entry(peer_id).or_insert_with(|| {
+                                    let forwarder_info = app.peers.entry(forwarder_peer_id).or_insert_with(|| {
                                         // Insert if new
                                         PeerInfo {
                                             nickname: None, // Nickname unknown until exchanged
@@ -352,11 +363,50 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                         }
                                     });
                                     // Modify the entry (whether newly inserted or existing)
-                                    peer_info.last_seen = now;
-                                    peer_info.status = OnlineStatus::Online;
+                                    forwarder_info.last_seen = now;
+                                    forwarder_info.status = OnlineStatus::Online;
 
-                                    // TODO: Deserialize and process message content (Heartbeat, Chat, etc.)
-                                    // match serde_json::from_slice::<Message>(&message.data) { ... }
+                                    // Attempt to deserialize the message data
+                                    match serde_json::from_slice::<Message>(&message.data) {
+                                        Ok(msg_content) => {
+                                            // Use message.source (original sender) for nickname association
+                                            if let Some(original_sender_peer_id) = message.source {
+                                                // Also update original sender's status/last_seen
+                                                let original_sender_info = app.peers.entry(original_sender_peer_id).or_insert_with(|| {
+                                                    PeerInfo {
+                                                        nickname: None, // Nickname unknown until exchanged
+                                                        status: OnlineStatus::Online,
+                                                        last_seen: now,
+                                                    }
+                                                });
+                                                original_sender_info.last_seen = now;
+                                                original_sender_info.status = OnlineStatus::Online;
+
+                                                match msg_content {
+                                                    Message::Heartbeat { nickname: Some(received_nickname), .. } => {
+                                                        // Update nickname for the *original sender* if different
+                                                        if original_sender_info.nickname.as_ref() != Some(&received_nickname) {
+                                                            original_sender_info.nickname = Some(received_nickname);
+                                                            // redraw will be set outside the match
+                                                        }
+                                                    }
+                                                    // Handle other message types here later (e.g., Chat)
+                                                    _ => {}
+                                                }
+                                            } else {
+                                                // This shouldn't happen with signed messages, but handle defensively.
+                                                app.push(format!(
+                                                    "Received message without source from {forwarder_peer_id}"
+                                                ));
+                                            }
+                                        }
+                                        Err(e) => {
+                                            // Log deserialization errors, but don't crash
+                                            app.push(format!(
+                                                "Error deserializing message from {forwarder_peer_id}: {e}"
+                                            ));
+                                        }
+                                    }
 
                                 }
                                 SwarmEvent::OutgoingConnectionError { error, .. } => {
@@ -439,7 +489,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                                         AppEvent::Dial(addr) => {
                                                             let _ = cmd_tx.send(AppEvent::Dial(addr));
                                                         }
-                                                        // Ignore any other event types returned by submit_command
+                                                        // Send NicknameUpdated event to the swarm task
+                                                        AppEvent::NicknameUpdated(peer_id, nickname) => {
+                                                            let _ = cmd_tx.send(AppEvent::NicknameUpdated(peer_id, nickname));
+                                                        }
+                                                        // Ignore any other event types for now
                                                         _ => {}
                                                     }
                                                 }
@@ -503,6 +557,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             // app.push(format!("mDNS Expired (ignored for status): {peer_id}"));
                             let _ = peer_id; // Avoid unused variable warning
                             // redraw = true; // Don't redraw if we ignore it
+                        }
+                        AppEvent::NicknameUpdated(peer_id, nickname) => {
+                            if let Some(peer_info) = app.peers.get_mut(&peer_id) {
+                                peer_info.nickname = Some(nickname);
+                                redraw = true;
+                            }
+                            // Optionally log if the peer wasn't found, but for now, just ignore it.
                         }
                         AppEvent::Dial(_) => {} // Handled by swarm task
                         AppEvent::Quit => {} // Already handled in Editing mode Enter

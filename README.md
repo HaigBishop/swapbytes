@@ -7,8 +7,6 @@
 ---
 
 ## To Do
-- small UI things
-    - notify when another user's nickname changes
 - private chat
 - trade offer -> accept/decline
 - transfer of file

@@ -10,7 +10,6 @@
 - small UI things
     - notify when another user's nickname changes
     - add /who <name> command which gives info about a user
-    - add /global command (does same as /chat global)
 - private chat
 - trade offer -> accept/decline
 - transfer of file

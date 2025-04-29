@@ -164,6 +164,16 @@ pub fn process_command(command_input: &str, app: &mut App) -> Option<AppEvent> {
                 }
             }
         }
+        "global" => {
+            // Switch to Global Chat (same logic as /chat global)
+            app.current_chat_context = ChatContext::Global;
+            app.push("Switched to global chat.".to_string());
+            // Focus chat pane and enter chat mode
+            app.focused_pane = FocusPane::Chat;
+            app.input_mode = InputMode::Chat;
+            app.chat_input.clear();
+            app.reset_chat_cursor();
+        }
         "forget" => {
             let num_peers = app.peers.len();
             app.peers.clear();
@@ -196,6 +206,7 @@ pub fn process_command(command_input: &str, app: &mut App) -> Option<AppEvent> {
             app.push("  /setdir <path>    - Set the absolute path for downloads.".to_string());
             app.push("  /setname <name>   - Set your nickname (3-16 chars, a-z, A-Z, 0-9, -, _).".to_string());
             app.push("  /chat <name>      - Switch chat (e.g. 'bob' or 'global').".to_string());
+            app.push("  /global           - Switch to the global chat view.".to_string());
             app.push("  /ping <multiaddr> - Ping a peer.".to_string());
             app.push("  /forget           - Forget all known peers.".to_string());
             app.push("  /hide             - Set your status to appear offline.".to_string());

@@ -31,24 +31,27 @@ mod tui;
 mod utils;
 mod commands;
 mod behavior;
+mod protocol;
 use tui::{App, AppEvent, InputMode, FocusPane, layout_chunks, PeerInfo, OnlineStatus}; // Add PeerInfo/OnlineStatus
 use behavior::{SwapBytesBehaviour, SwapBytesBehaviourEvent};
 
-/// Gossipsub topic for SwapBytes
+/// The public topic used for global chat messages via Gossipsub.
 const SWAPBYTES_TOPIC: &str = "swapbytes-global-chat";
-/// Interval for sending heartbeats
+/// How often we send out a "I'm still here" message (heartbeat).
 const HEARTBEAT_INTERVAL_SECS: u64 = 2;
-/// Timeout duration for marking peers offline
+/// How long we wait without hearing from a peer before marking them as potentially offline.
 const PEER_TIMEOUT_SECS: u64 = 8;
 
 // --- Define Message Types ---
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(tag = "type")] // Use a 'type' field to distinguish message types
 enum Message {
+    /// A periodic message to signal presence and share nickname.
     Heartbeat {
-        timestamp_ms: u64, // Add timestamp field
-        nickname: Option<String>, // Add optional nickname
+        timestamp_ms: u64,        // When the heartbeat was sent.
+        nickname: Option<String>, // The sender's nickname, if set.
     },
+    /// A message sent to the public chat topic.
     GlobalChatMessage {
         content: String,
         timestamp_ms: u64,
@@ -191,6 +194,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                 }
                             }
                         }
+                        // Handle sending private messages via Request/Response
+                        AppEvent::SendPrivateMessage { target_peer, message } => {
+                            let request = protocol::PrivateRequest::ChatMessage(message);
+                            // Send the request
+                            swarm.behaviour_mut().request_response.send_request(&target_peer, request);
+                            // Log the attempt (optional)
+                            // let _ = swarm_tx.send(AppEvent::LogMessage(format!("Sent private message request to {}", target_peer)));
+                        }
                         // Ignore other commands if any were sent here by mistake
                         _ => {}
                     }
@@ -280,17 +291,66 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                     }
                                 }
                             }
+                            // --- Handle Request/Response Events ---
+                            SwarmEvent::Behaviour(SwapBytesBehaviourEvent::RequestResponse(event)) => {
+                                use libp2p::request_response::{Event, Message};
+                                match event {
+                                    Event::Message { peer, message, connection_id: _ } => match message {
+                                        Message::Request { request, channel, .. } => {
+                                            match request {
+                                                protocol::PrivateRequest::ChatMessage(text) => {
+                                                    // Send PrivateMessageReceived event to UI task
+                                                    if let Err(e) = swarm_tx.send(AppEvent::PrivateMessageReceived { 
+                                                        sender_id: peer,
+                                                        content: text,
+                                                    }) {
+                                                        // Log if sending to UI fails
+                                                        eprintln!("[Swarm] Error sending PrivateMessageReceived to UI: {}", e);
+                                                    }
+                                                    
+                                                    // Send Ack response
+                                                    if let Err(e) = swarm.behaviour_mut().request_response.send_response(channel, protocol::PrivateResponse::Ack) {
+                                                        let _ = swarm_tx.send(AppEvent::LogMessage(format!("[Swarm] Error sending Ack response to {}: {:?}", peer, e)));
+                                                    }
+                                                }
+                                                // Add other PrivateRequest variants later (e.g., Offer)
+                                            }
+                                        }
+                                        Message::Response { request_id, response } => {
+                                            match response {
+                                                protocol::PrivateResponse::Ack => {
+                                                    // let _ = swarm_tx.send(AppEvent::LogMessage(format!("[Swarm] Received Ack for request {:?} from {}", request_id, peer)));
+                                                }
+                                                // Add other PrivateResponse variants later (e.g., Accept/Decline)
+                                            }
+                                            // Avoid request_id unused warning
+                                            let _ = request_id;
+                                        }
+                                    }
+                                    Event::OutboundFailure { peer, request_id, error, connection_id: _ } => {
+                                        let _ = swarm_tx.send(AppEvent::LogMessage(format!("[Swarm] Outbound RequestResponse failure to {}: Request {:?}, Error: {}", peer, request_id, error)));
+                                    }
+                                    Event::InboundFailure { peer, request_id, error, connection_id: _ } => {
+                                        let _ = swarm_tx.send(AppEvent::LogMessage(format!("[Swarm] Inbound RequestResponse failure from {}: Request {:?}, Error: {}", peer, request_id, error)));
+                                    }
+                                    Event::ResponseSent { peer, request_id, connection_id: _ } => {
+                                        // Optional: Log when response is successfully sent
+                                        // let _ = swarm_tx.send(AppEvent::LogMessage(format!("[Swarm] Sent response for request {:?} to {}", request_id, peer)));
+
+                                        let _ = peer;
+                                        let _ = request_id;
+                                    }
+                                }
+                            }
                             // Forward other behaviour events (like Ping) generically
                             SwarmEvent::Behaviour(other_behaviour_event) => {
-                                // Check if it's NOT a Gossipsub event before forwarding generically
-                                // (We handled Gossipsub::Message specifically above)
-                                if !matches!(other_behaviour_event, SwapBytesBehaviourEvent::Gossipsub(_)) {
+                                // Check if it's NOT a Gossipsub or RequestResponse event before forwarding generically
+                                if !matches!(other_behaviour_event, SwapBytesBehaviourEvent::Gossipsub(_) | SwapBytesBehaviourEvent::RequestResponse(_)) {
                                      let _ = swarm_tx.send(AppEvent::Swarm(SwarmEvent::Behaviour(other_behaviour_event)));
                                 } else {
-                                    // Log ignored Gossipsub events
-                                    // let _ = swarm_tx.send(AppEvent::LogMessage(format!("[Swarm] Ignored Gossipsub event: {:?}", other_behaviour_event)));
+                                    // Log ignored Gossipsub/ReqRes events
+                                    // let _ = swarm_tx.send(AppEvent::LogMessage(format!("[Swarm] Ignored specific Gossipsub/ReqRes event: {:?}", other_behaviour_event)));
                                 }
-                                // Ignore other Gossipsub event types for now (like Subscribed, Unsubscribed)
                             }
                             // Forward non-behaviour swarm events (like NewListenAddr, ConnectionEstablished, etc.)
                             other_swarm_event => {
@@ -628,7 +688,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                                             app.push(format!("Command sent visibility change: {}", is_visible));
                                                             let _ = cmd_tx.send(AppEvent::VisibilityChanged(is_visible));
                                                         }
-                                                        // Ignore any other event types for now
+                                                        // Ignore any other event types potentially returned by submit_command
                                                         _ => {}
                                                     }
                                                 }
@@ -738,14 +798,57 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                                             // Optionally, don't clear input on serialization error
                                                         }
                                                     }
-                                                } else if !app.chat_input.is_empty() && matches!(app.current_chat_context, tui::ChatContext::Private { .. }) {
-                                                    // Placeholder for Private Chat sending logic
-                                                    app.push(format!("[PRIVATE CHAT (not implemented)] {}", app.chat_input));
-                                                    // Clear input and return to normal mode (temporary)
-                                                    app.chat_input.clear();
-                                                    app.reset_chat_cursor();
-                                                    app.input_mode = InputMode::Normal;
-                                                    redraw = true;
+                                                } else if !app.chat_input.is_empty() {
+                                                    // Handle Private Chat Context
+                                                    if let tui::ChatContext::Private { target_peer_id, .. } = app.current_chat_context {
+                                                        let message_content = app.chat_input.clone();
+
+                                                        // Send SendPrivateMessage event to swarm task
+                                                        if let Err(e) = cmd_tx.send(AppEvent::SendPrivateMessage {
+                                                            target_peer: target_peer_id,
+                                                            message: message_content.clone(), // Clone needed for potential local history
+                                                        }) {
+                                                            app.push(format!("Error sending private message command: {}", e));
+                                                        } else {
+                                                            // app.push(format!("Sending private message to {:?}...", target_peer_id));
+                                                            // Successfully sent event to swarm task, now add to local history
+                                                            let timestamp_ms = SystemTime::now()
+                                                                .duration_since(UNIX_EPOCH)
+                                                                .expect("Time went backwards")
+                                                                .as_millis() as u64;
+                                                            let local_peer_id = app.local_peer_id.expect("Local PeerID must be set");
+                                                            // Note: Use app.nickname (our own nickname) for sender_nickname here.
+                                                            let chat_msg = tui::ChatMessage {
+                                                                sender_id: local_peer_id,
+                                                                sender_nickname: app.nickname.clone(),
+                                                                content: message_content, // Use the cloned content
+                                                                timestamp_ms,
+                                                            };
+                                                            
+                                                            let history = app.private_chat_histories.entry(target_peer_id).or_default();
+                                                            let current_len = history.len(); // Length before adding
+                                                            history.push(chat_msg);
+
+                                                            // Auto-scroll (since we are viewing this chat)
+                                                            let current_max_scroll = current_len.saturating_sub(app.chat_viewport_height.max(1));
+                                                            if app.chat_scroll >= current_max_scroll {
+                                                                let new_max_scroll = history.len().saturating_sub(app.chat_viewport_height.max(1));
+                                                                app.chat_scroll = new_max_scroll;
+                                                            }
+                                                        }
+
+                                                        // Clear input and return to normal mode (do this regardless of send success)
+                                                        app.chat_input.clear();
+                                                        app.reset_chat_cursor();
+                                                        app.input_mode = InputMode::Normal;
+                                                        redraw = true;
+
+                                                    } else {
+                                                        // Should not happen if context is not Global, but handle defensively
+                                                        app.push("Error: Cannot send message in unknown context.".to_string());
+                                                        app.input_mode = InputMode::Normal; // Reset mode
+                                                        redraw = true;
+                                                    }
                                                 } else {
                                                     // Input is empty, just go back to normal mode
                                                     app.input_mode = InputMode::Normal;
@@ -852,6 +955,32 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                     // Use the already updated nickname from the `new_nickname` variable
                                     app.push(format!("Peer changed nickname: {} → {} {}", old_name, new_nickname, id_suffix));
                                 }
+
+                                // --- Update Chat Title if viewing private chat with this peer ---
+                                if let tui::ChatContext::Private { target_peer_id, target_nickname } = &mut app.current_chat_context {
+                                    if *target_peer_id == peer_id {
+                                        *target_nickname = Some(new_nickname.clone()); // Update the nickname in the context
+                                    }
+                                }
+
+                                // --- Update Private Chat History for this peer ---
+                                if let Some(history) = app.private_chat_histories.get_mut(&peer_id) {
+                                    for message in history.iter_mut() {
+                                        // Only update messages sent *by* this peer
+                                        if message.sender_id == peer_id {
+                                            message.sender_nickname = Some(new_nickname.clone());
+                                        }
+                                    }
+                                }
+
+                                // --- Update Global Chat History for this peer ---
+                                for message in app.global_chat_history.iter_mut() {
+                                    // Only update messages sent *by* this peer
+                                    if message.sender_id == peer_id {
+                                        message.sender_nickname = Some(new_nickname.clone());
+                                    }
+                                }
+
                             }
                             // Optionally log if the peer wasn't found, but for now, just ignore it.
                         }
@@ -871,7 +1000,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             let chat_msg = tui::ChatMessage {
                                 sender_id,
                                 sender_nickname: sender_nickname.clone(), // Clone nickname
-                                content: content.clone(), // Clone content
+                                content,
                                 timestamp_ms,
                             };
                             // Log that we processed this specific event
@@ -881,6 +1010,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
                             // Add to history
                             app.global_chat_history.push(chat_msg);
+
+                            // --- Add notification if user is in a private chat ---
+                            if let tui::ChatContext::Private { .. } = app.current_chat_context {
+                                let sender_display_name = sender_nickname.clone().unwrap_or_else(|| {
+                                    let id_str = sender_id.to_base58();
+                                    let len = id_str.len();
+                                    format!("user(...{})", &id_str[len.saturating_sub(6)..])
+                                });
+                                app.push(format!("{} sent a global message!", sender_display_name));
+                            }
 
                             // Auto-scroll chat view IF already at the bottom
                             let current_max_scroll = app.global_chat_history.len().saturating_sub(app.chat_viewport_height.max(1)).saturating_sub(1); // Max scroll before adding
@@ -896,6 +1035,64 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             // This event is sent TO the swarm task, should not be received here.
                             // Log if it happens, but otherwise ignore.
                             app.log("Warning: Received PublishGossipsub event in UI loop.".to_string());
+                        }
+                        AppEvent::SendPrivateMessage { .. } => {
+                            // This event is sent TO the swarm task, should not be received here.
+                            // Log if it happens, but otherwise ignore.
+                            app.log("Warning: Received SendPrivateMessage event in UI loop.".to_string());
+                        }
+                        AppEvent::PrivateMessageReceived { sender_id, content } => {
+                            // Get sender's nickname from peers map (if known)
+                            let sender_nickname = app.peers.get(&sender_id).and_then(|info| info.nickname.clone());
+
+                            // Get current timestamp
+                            let timestamp_ms = SystemTime::now()
+                                .duration_since(UNIX_EPOCH)
+                                .expect("Time went backwards")
+                                .as_millis() as u64;
+
+                            // Create the chat message struct
+                            let chat_msg = tui::ChatMessage {
+                                sender_id,
+                                sender_nickname, // May be None
+                                content,
+                                timestamp_ms,
+                            };
+
+                            // Add message to the corresponding private history
+                            let history = app.private_chat_histories.entry(sender_id).or_default();
+                            let current_len = history.len(); // Get length before adding
+                            history.push(chat_msg);
+
+                            // Auto-scroll if the user is currently viewing this private chat
+                            let mut notify_in_console = true; // Assume notification needed by default
+                            if let tui::ChatContext::Private { target_peer_id, .. } = &app.current_chat_context {
+                                if *target_peer_id == sender_id {
+                                    notify_in_console = false; // Don't notify if already viewing
+                                    let current_max_scroll = current_len.saturating_sub(app.chat_viewport_height.max(1));
+                                    if app.chat_scroll >= current_max_scroll {
+                                        let new_max_scroll = history.len().saturating_sub(app.chat_viewport_height.max(1));
+                                        app.chat_scroll = new_max_scroll;
+                                    }
+                                }
+                            }
+
+                            // Add notification to console log if not viewing the private chat
+                            if notify_in_console {
+                                let sender_display_name = app.peers.get(&sender_id)
+                                    .and_then(|info| info.nickname.clone())
+                                    .unwrap_or_else(|| {
+                                        let id_str = sender_id.to_base58();
+                                        let len = id_str.len();
+                                        format!("user(...{})", &id_str[len.saturating_sub(6)..])
+                                    });
+                                app.push(format!("{} sent you a private message!", sender_display_name));
+                            }
+
+                            // TODO: Potentially add a notification in the console log or users list?
+                            // app.push(format!("Received private message from {}", sender_id));
+
+                            redraw = true;
                         }
                     }
                 } else {

@@ -1,8 +1,8 @@
 /*
-TUI related components for the libp2p ping application.
+Code related to the Terminal User Interface (TUI)
 */
 
-// TUI imports
+// Import necessary TUI components from `ratatui`
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -13,162 +13,189 @@ use ratatui::{
     layout::{Constraint, Layout},
     style::{Color, Style},
 };
+// Import terminal event handling from `crossterm`
 use crossterm::event;
+// Standard library imports for file paths, data structures, time, and random numbers
 use std::path::PathBuf;
 use std::collections::HashMap;
-use std::time::Instant;
-use std::time::Duration;
+use std::time::{Instant, Duration};
 use rand::Rng;
 
-// libp2p imports
+// Import necessary libp2p types for network interaction
 use libp2p::swarm::SwarmEvent;
 use libp2p::{Multiaddr, PeerId};
+// Import our custom network behavior events
 use crate::behavior::SwapBytesBehaviourEvent;
 
-/// Represents a single message in the chat history.
+/// Holds the details of a single chat message to be displayed.
 #[derive(Debug, Clone)]
 pub struct ChatMessage {
+    /// The unique ID of the peer who sent the message.
     pub sender_id: PeerId,
+    /// The chosen nickname of the sender, if known.
     pub sender_nickname: Option<String>,
+    /// The actual text content of the message.
     pub content: String,
+    /// When the message was received (as milliseconds since epoch).
     pub timestamp_ms: u64,
 }
 
-/// Time to wait before resetting the pinging state indicator.
+/// How long the "Pinging..." indicator stays visible after sending a ping.
 pub const PINGING_DURATION: Duration = Duration::from_millis(2000);
 
-/// Input modes for the TUI.
+/// Different modes the user can be in when interacting with the input boxes.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub enum InputMode {
+    /// Default mode: Not actively typing in any input box. Keys control focus/scrolling.
     #[default]
     Normal,
+    /// Typing a command in the console input box (e.g., `/dial ...`).
     Command,
+    /// Typing a message in the chat input box.
     Chat,
 }
 
-/// Represents the currently focused UI pane.
+/// Represents which main section (pane) of the UI currently has focus.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub enum FocusPane {
+    /// The console area (logs and command input) is focused.
     #[default]
     Console,
+    /// The chat area (messages and chat input) is focused.
     Chat,
+    /// The list of users is focused.
     UsersList,
 }
 
-/// Represents the current chat context (Global or Private).
+/// Tracks whether the user is currently viewing the global chat or a private chat.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChatContext {
+    /// Viewing the main public chat room.
     Global,
-    Private { target_peer_id: PeerId, target_nickname: Option<String> },
+    /// Viewing a private one-on-one chat with a specific peer.
+    Private {
+        target_peer_id: PeerId, // The ID of the peer we're chatting with.
+        target_nickname: Option<String>, // Their nickname, if we know it.
+    },
 }
 
-/// Represents the online status of a peer.
+/// Indicates whether a peer is currently considered online or offline.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OnlineStatus {
     Online,
     Offline,
 }
 
-/// Holds information about a discovered peer.
+/// Stores information about a peer we've discovered on the network.
 #[derive(Debug, Clone)]
 pub struct PeerInfo {
+    /// The peer's chosen nickname, if they've shared it.
     pub nickname: Option<String>,
+    /// Whether the peer is currently online or offline.
     pub status: OnlineStatus,
+    /// When we last heard from this peer (used for determining offline status).
     pub last_seen: Instant,
 }
 
-/// Application state for the TUI.
+/// Holds the entire state of the TUI application.
+/// This includes user input, logs, chat history, peer info, UI focus, etc.
 #[derive(Debug)]
 pub struct App {
-    /// Log history (limited).
+    /// A list of log messages displayed in the console pane (keeps the last `MAX_LOG_LINES`).
     pub log: Vec<String>,
-    /// Current value of the command input box.
+    /// The current text typed into the command input box.
     pub input: String,
-    /// Position of cursor in the command input box.
+    /// Where the cursor is located within the command input text.
     pub cursor_position: usize,
-    /// Current value of the chat input box.
+    /// The current text typed into the chat input box.
     pub chat_input: String,
-    /// Position of cursor in the chat input box.
+    /// Where the cursor is located within the chat input text.
     pub chat_cursor_position: usize,
-    /// Current input mode.
+    /// The current `InputMode` (Normal, Command, or Chat).
     pub input_mode: InputMode,
-    /// Flag indicating if the application should exit.
+    /// If `true`, the application should shut down.
     pub exit: bool,
-    /// Currently focused pane.
+    /// Which pane (`FocusPane`) is currently active.
     pub focused_pane: FocusPane,
-    /// Vertical scroll position for the console log.
+    /// How far the console log is scrolled down (0 means scrolled to the top).
     pub console_scroll: usize,
-    /// Height of the console viewport (number of visible lines).
+    /// The number of lines visible in the console log area (updates on resize).
     pub console_viewport_height: usize,
-    /// Addresses the Swarm is listening on.
+    /// The network addresses our application is listening on.
     pub listening_addresses: Vec<Multiaddr>,
-    /// Currently configured download directory (must be verified).
+    /// The directory where downloaded files will be saved (if set).
     pub download_dir: Option<PathBuf>,
-    /// User's chosen nickname (must be verified).
+    /// The user's chosen nickname for display in chat and user lists.
     pub nickname: Option<String>,
-    /// The local peer's unique ID.
+    /// Our own unique `PeerId`.
     pub local_peer_id: Option<PeerId>,
-    /// Map of discovered peers and their info.
+    /// A map storing information (`PeerInfo`) about discovered peers, keyed by their `PeerId`.
     pub peers: HashMap<PeerId, PeerInfo>,
-    /// Flag indicating if a ping command is currently active.
+    /// `true` if we are currently waiting for a ping response.
     pub pinging: bool,
-    /// Timestamp when the current ping command was initiated.
+    /// When the last ping command was initiated. Used with `PINGING_DURATION`.
     pub ping_start_time: Option<Instant>,
-    /// Flag indicating if the user wants to be perceived as online.
+    /// Whether the user wants to appear as "Online" to other peers.
     pub is_visible: bool,
-    /// The current chat context (global or private).
+    /// The current `ChatContext` (Global or Private).
     pub current_chat_context: ChatContext,
-    /// History of global chat messages.
+    /// Stores the history of messages for the global chat.
     pub global_chat_history: Vec<ChatMessage>,
-    /// Vertical scroll position for the chat message view.
+    /// How far the chat message history is scrolled down.
     pub chat_scroll: usize,
-    /// Height of the chat viewport (number of visible lines).
+    /// The number of lines visible in the chat message area (updates on resize).
     pub chat_viewport_height: usize,
+    /// Stores the history of private messages, keyed by the `PeerId` of the other participant.
+    pub private_chat_histories: HashMap<PeerId, Vec<ChatMessage>>,
 }
 
+// Provides default values for the `App` state when the application starts.
 impl Default for App {
     fn default() -> Self {
         // Generate a username with a random 4-digit number
         // e.g. user9350
-        let mut rng = rand::thread_rng();
-        let random_number: u16 = rng.gen_range(0..10000);
+        let mut rng = rand::rng();
+        let random_number: u16 = rng.random_range(0..10000);
         let nickname = format!("user{:04}", random_number);
 
         App {
-            log: Vec::new(),
-            input: String::new(),
-            cursor_position: 0,
-            chat_input: String::new(),
-            chat_cursor_position: 0,
-            input_mode: InputMode::default(),
-            exit: false,
-            focused_pane: FocusPane::default(),
-            console_scroll: 0, // Start at the top
-            console_viewport_height: 2, // default minimal height
-            listening_addresses: Vec::new(), // Initialize empty list
-            download_dir: None, // Initialize as None
-            nickname: Some(nickname), // Initialize nickname with random user string
-            local_peer_id: None, // Initialize PeerId as None
-            peers: HashMap::new(), // Initialize empty peers map
-            pinging: false, // Initialize pinging state
-            ping_start_time: None, // Initialize ping start time
-            is_visible: true, // User is visible by default
-            current_chat_context: ChatContext::Global, // Default to global chat
-            global_chat_history: Vec::new(), // Initialize empty global chat history
-            chat_scroll: 0, // Start chat scroll at the top
-            chat_viewport_height: 2, // Default minimal chat height
+            log: Vec::new(), // Start with an empty log
+            input: String::new(), // Start with empty command input
+            cursor_position: 0, // Cursor at the start
+            chat_input: String::new(), // Start with empty chat input
+            chat_cursor_position: 0, // Cursor at the start
+            input_mode: InputMode::default(), // Start in Normal mode
+            exit: false, // Don't exit yet
+            focused_pane: FocusPane::default(), // Start with Console focused
+            console_scroll: 0, // Start scrolled to the top
+            console_viewport_height: 2, // Small default height
+            listening_addresses: Vec::new(), // No known addresses initially
+            download_dir: None, // No download directory set initially
+            nickname: Some(nickname), // Use the generated nickname
+            local_peer_id: None, // We don't know our PeerId yet
+            peers: HashMap::new(), // No known peers initially
+            pinging: false, // Not pinging initially
+            ping_start_time: None, // No ping started yet
+            is_visible: true, // Appear online by default
+            current_chat_context: ChatContext::Global, // Start in global chat
+            global_chat_history: Vec::new(), // Empty global chat
+            chat_scroll: 0, // Start chat scrolled to the top
+            chat_viewport_height: 2, // Small default chat height
+            private_chat_histories: HashMap::new(), // No private chats yet
         }
     }
 }
 
-// Max number of lines to keep in the log history
+// Limit how many lines we keep in the console log to prevent using too much memory.
 const MAX_LOG_LINES: usize = 1000;
 
+// Methods for updating the `App` state.
 impl App {
-    /// Adds a new message line to the log, maintaining a maximum history size
-    /// and auto-scrolling to the bottom.
+    /// Adds a regular message to the console log.
+    /// Ensures the log doesn't exceed `MAX_LOG_LINES` and automatically scrolls down.
     pub fn push<S: Into<String>>(&mut self, line: S) {
         self.log.push(line.into());
+        // If the log is too long, remove the oldest message(s).
         if self.log.len() > MAX_LOG_LINES {
             self.log.drain(0..self.log.len() - MAX_LOG_LINES);
             // Adjust scroll if necessary when lines are removed from the top
@@ -177,14 +204,16 @@ impl App {
             let max_scroll = self.log.len().saturating_sub(1);
             self.console_scroll = self.console_scroll.min(max_scroll);
         }
-        // Auto-scroll to the bottom respecting viewport height
-        let viewport = self.console_viewport_height.max(1);
+        // Auto-scroll to the bottom so the latest message is visible.
+        // We calculate the scroll position based on the log length and viewport height.
+        let viewport = self.console_viewport_height.max(1); // Ensure viewport height is at least 1
         let new_scroll_pos = self.log.len().saturating_sub(viewport);
         self.console_scroll = new_scroll_pos;
     }
 
-    /// Adds a new message line to the log (prepended with "[LOG]"),
-    /// maintaining a maximum history size and auto-scrolling to the bottom.
+    /// Adds a message prefixed with "[LOG]" to the console log.
+    /// Useful for distinguishing internal log messages from user commands/output.
+    /// Also ensures the log doesn't exceed `MAX_LOG_LINES` and auto-scrolls.
     pub fn log<S: Into<String>>(&mut self, line: S) {
         self.log.push(format!("[LOG] {}", line.into()));
         if self.log.len() > MAX_LOG_LINES {
@@ -199,31 +228,36 @@ impl App {
         self.console_scroll = new_scroll_pos;
     }
 
-    // --- Input Handling Methods (adapted from input_example.rs) ---
+    // --- Command Input Handling ---
+    // These methods manage the text and cursor in the command input box.
 
-    /// Moves the cursor one character to the left.
+    /// Moves the command input cursor one character left.
     pub fn move_cursor_left(&mut self) {
         let cursor_moved_left = self.cursor_position.saturating_sub(1);
         self.cursor_position = self.clamp_cursor(cursor_moved_left);
     }
 
-    /// Moves the cursor one character to the right.
+    /// Moves the command input cursor one character right.
     pub fn move_cursor_right(&mut self) {
         let cursor_moved_right = self.cursor_position.saturating_add(1);
         self.cursor_position = self.clamp_cursor(cursor_moved_right);
     }
 
-    /// Inserts a character at the current cursor position.
+    /// Inserts a character into the command input at the cursor position.
     pub fn enter_char(&mut self, new_char: char) {
+        // Find the correct byte index for inserting (handles multi-byte characters).
         let index = self.byte_index();
         self.input.insert(index, new_char);
+        // Move the cursor after the inserted character.
         self.move_cursor_right();
     }
 
-    /// Deletes the character before the current cursor position.
+    /// Deletes the character *before* the command input cursor (Backspace key).
     pub fn delete_char(&mut self) {
+        // Can't delete if the cursor is already at the beginning.
         let is_not_cursor_leftmost = self.cursor_position != 0;
         if is_not_cursor_leftmost {
+            // Rebuild the string without the character before the cursor.
             let current_index = self.cursor_position;
             let from_left_to_current_index = current_index - 1;
             let before_char_to_delete = self.input.chars().take(from_left_to_current_index);
@@ -233,67 +267,76 @@ impl App {
         }
     }
 
-    /// Returns the byte index based on the character position for UTF-8 strings.
+    /// Helper function to get the byte index in the string corresponding
+    /// to the character-based cursor position. Necessary because Rust strings
+    /// are UTF-8, and characters can take up multiple bytes.
     fn byte_index(&self) -> usize {
         self.input
-            .char_indices()
-            .map(|(i, _)| i)
-            .nth(self.cursor_position)
-            .unwrap_or(self.input.len())
+            .char_indices() // Get iterator of (byte_index, char)
+            .map(|(i, _)| i) // Keep only the byte indices
+            .nth(self.cursor_position) // Find the index corresponding to the character cursor position
+            .unwrap_or(self.input.len()) // If cursor is at the end, use the string length
     }
 
-    /// Clamps the cursor position within the bounds of the input string's characters.
+    /// Helper function to ensure the cursor position stays within the valid range
+    /// of character indices (0 to number of characters).
     fn clamp_cursor(&self, new_cursor_pos: usize) -> usize {
         new_cursor_pos.clamp(0, self.input.chars().count())
     }
 
-    /// Resets the cursor position to the beginning of the input string.
+    /// Moves the command input cursor to the very beginning (position 0).
     pub fn reset_cursor(&mut self) {
         self.cursor_position = 0;
     }
 
-    /// Submits the current input as a command.
-    /// Returns an optional AppEvent if a command needs to be processed by the main loop.
+    /// Processes the command currently in the input box when Enter is pressed.
+    /// It logs the command, clears the input, returns to Normal mode,
+    /// and sends an `AppEvent` to the main loop for handling the command logic.
     pub fn submit_command(&mut self) -> Option<AppEvent> {
-        self.push(format!("> {}", self.input)); // Log the entered command
+        // Add the entered command to the console log for history.
+        self.push(format!("> {}", self.input));
 
-        // Create a copy of the input string to avoid borrow checker issues
-        let input_copy = self.input.clone(); 
+        // Make a copy because `process_command` might need mutable access to `self`.
+        let input_copy = self.input.clone();
+        // Remove the leading '/' if present, otherwise use the whole input.
         let command_input = input_copy.strip_prefix('/').unwrap_or(&input_copy);
 
-        // Call the command processor from the commands module
+        // Delegate the actual command parsing and execution logic.
         let event_to_send = crate::commands::process_command(command_input, self);
 
-        // Clear the original input field
+        // Clear the input field and reset the cursor.
         self.input.clear();
         self.reset_cursor();
-        self.input_mode = InputMode::Normal; // Return to normal mode after submit
+        // Go back to normal mode, ready for the next command or focus change.
+        self.input_mode = InputMode::Normal;
 
-        event_to_send // Return the event for the main loop
+        // Return the event (e.g., Dial, Quit) for the main loop to handle.
+        event_to_send
     }
 
-    // --- Chat Input Methods ---
+    // --- Chat Input Handling ---
+    // Similar methods for managing the text and cursor in the chat input box.
 
-    /// Moves the chat cursor one character to the left.
+    /// Moves the chat input cursor one character left.
     pub fn move_chat_cursor_left(&mut self) {
         let cursor_moved_left = self.chat_cursor_position.saturating_sub(1);
         self.chat_cursor_position = self.clamp_chat_cursor(cursor_moved_left);
     }
 
-    /// Moves the chat cursor one character to the right.
+    /// Moves the chat input cursor one character right.
     pub fn move_chat_cursor_right(&mut self) {
         let cursor_moved_right = self.chat_cursor_position.saturating_add(1);
         self.chat_cursor_position = self.clamp_chat_cursor(cursor_moved_right);
     }
 
-    /// Inserts a character at the current chat cursor position.
+    /// Inserts a character into the chat input at the cursor position.
     pub fn enter_chat_char(&mut self, new_char: char) {
         let index = self.chat_byte_index();
         self.chat_input.insert(index, new_char);
         self.move_chat_cursor_right();
     }
 
-    /// Deletes the character before the current chat cursor position.
+    /// Deletes the character *before* the chat input cursor (Backspace key).
     pub fn delete_chat_char(&mut self) {
         let is_not_cursor_leftmost = self.chat_cursor_position != 0;
         if is_not_cursor_leftmost {
@@ -306,7 +349,7 @@ impl App {
         }
     }
 
-    /// Returns the byte index based on the chat character position for UTF-8 strings.
+    /// Helper to get the byte index for the chat cursor position.
     fn chat_byte_index(&self) -> usize {
         self.chat_input
             .char_indices()
@@ -315,104 +358,118 @@ impl App {
             .unwrap_or(self.chat_input.len())
     }
 
-    /// Clamps the chat cursor position within the bounds of the chat input string's characters.
+    /// Helper to clamp the chat cursor position.
     fn clamp_chat_cursor(&self, new_cursor_pos: usize) -> usize {
         new_cursor_pos.clamp(0, self.chat_input.chars().count())
     }
 
-    /// Resets the chat cursor position to the beginning of the chat input string.
+    /// Moves the chat input cursor to the beginning.
     pub fn reset_chat_cursor(&mut self) {
         self.chat_cursor_position = 0;
     }
 
     // --- Rendering Helper Functions ---
+    // These functions draw the different parts of the UI.
 
-    /// Renders the console pane (log and input).
+    /// Draws the console pane, which includes the log messages and the command input box.
     fn render_console_pane(&self, area: Rect, buf: &mut Buffer) {
+        // Style to use for the border when this pane is focused.
         let focused_style = Style::default().fg(Color::Yellow);
-        let unfocused_style = Style::default();
+        let unfocused_style = Style::default(); // Style when not focused.
 
+        // Help text shown at the bottom depends on the current input mode.
         let console_title_bottom = match self.input_mode {
             InputMode::Normal => " Focus: Tab | Scroll: ↑/↓ | Quit: Ctrl+Q ".bold(),
             InputMode::Command => " Submit: Enter | Cancel: Esc ".bold(),
-            InputMode::Chat => " Focus: Tab | Quit: Ctrl+Q ".bold(),
+            // While in Chat mode, console hints might still be relevant if user tabs back.
+            InputMode::Chat => " Focus: Tab | Scroll: ↑/↓ | Quit: Ctrl+Q ".bold(),
         };
+        // Create the main block for the console area.
         let console_block = Block::bordered()
-            .title(" Console ".bold())
-            .title_bottom(Line::from(console_title_bottom))
-            .border_set(border::THICK)
+            .title(" Console ".bold()) // Title at the top.
+            .title_bottom(Line::from(console_title_bottom)) // Help text at the bottom.
+            .border_set(border::THICK) // Use thick borders.
+            // Highlight border if this pane is focused.
             .border_style(if self.focused_pane == FocusPane::Console { focused_style } else { unfocused_style });
 
-        // Layout within the console block (Log + Input)
-        let console_inner_area = console_block.inner(area);
+        // Divide the console area vertically: one part for logs, one for input.
+        let console_inner_area = console_block.inner(area); // Get area inside the border.
         let console_chunks = Layout::vertical([
-            Constraint::Min(1),
-            Constraint::Length(3),
+            Constraint::Min(1),      // Log area takes remaining space (at least 1 line).
+            Constraint::Length(3), // Input area is fixed at 3 lines high (border + text + border).
         ])
         .split(console_inner_area);
 
         let log_area = console_chunks[0];
         let input_area = console_chunks[1];
 
-        // Render the console block border first
+        // Draw the console block's borders and titles onto the buffer.
         console_block.render(area, buf);
 
-        // Render Log Panel within its area
-        let log_text = Text::from(
-            self.log
-                .iter()
-                .map(|l| Line::from(l.clone()))
-                .collect::<Vec<_>>(),
-        );
-        let log_paragraph = Paragraph::new(log_text)
+        // --- Render Log Messages ---
+        // Convert log lines (Vec<String>) into `ratatui` `Text` objects.
+        let log_text: Vec<Line> = self.log.iter().map(|l| Line::from(l.clone())).collect();
+        // Create a Paragraph widget to display the log text.
+        let log_paragraph = Paragraph::new(Text::from(log_text))
+            // Apply the current scroll offset.
             .scroll((self.console_scroll as u16, 0));
+        // Draw the log paragraph into its designated area.
         log_paragraph.render(log_area, buf);
 
-        // Render Input Box within its area
+        // --- Render Command Input Box ---
+        // Title changes slightly if a ping is in progress.
         let input_title = if self.pinging {
-            " Input (Pinging...) " // Indicate pinging state
+            " Input (Pinging...) "
         } else {
-            " Command Input (/) " // Normal state
+            " Command Input (/) "
         };
+        // Create the paragraph for the input text.
         let input_paragraph = Paragraph::new(self.input.as_str())
+            // Style the input text itself (e.g., yellow when in Command mode).
             .style(match self.input_mode {
                 InputMode::Normal => Style::default(),
                 InputMode::Command => Style::default().fg(Color::Yellow),
                 InputMode::Chat => Style::default(),
             })
-            .block(Block::bordered().title(input_title.bold())); // Use dynamic title
+            // Put the input text inside its own bordered box with a title.
+            .block(Block::bordered().title(input_title.bold()));
+        // Draw the input paragraph into its area.
         input_paragraph.render(input_area, buf);
     }
 
-    /// Renders the users list pane.
+    /// Draws the pane displaying the list of discovered users and their status.
     fn render_users_pane(&self, area: Rect, buf: &mut Buffer) {
         let focused_style = Style::default().fg(Color::Yellow);
         let unfocused_style = Style::default();
         let is_focused = self.focused_pane == FocusPane::UsersList;
 
+        // Create the main block for the users list area.
         let users_block = Block::bordered()
             .title(" Users ".bold())
             .border_set(border::THICK)
             .border_style(if is_focused { focused_style } else { unfocused_style });
 
+        // Get the area inside the border to draw the list.
         let inner_area = users_block.inner(area);
-        users_block.render(area, buf); // Render block border first
+        // Draw the block's borders and title first.
+        users_block.render(area, buf);
 
-        // --- Render actual user list inside inner_area ---
-        let mut items = Vec::new();
+        // --- Prepare the list items ---
+        let mut items: Vec<ListItem> = Vec::new();
 
-        // Add self ("You") to the top of the list if local_peer_id is set
+        // Add "You" (the local user) to the top of the list.
         if let Some(local_id) = self.local_peer_id {
             let id_str = local_id.to_base58();
             let len = id_str.len();
+            // Show only the last 6 chars of the PeerId for brevity.
             let start_index = len.saturating_sub(6);
             let id_suffix = format!("(...{})", &id_str[start_index..]);
             let display_name = format!("You {}", id_suffix);
             // Set prefix and style based on visibility status
             let (prefix, status_style) = if self.is_visible {
-                ("[✓] ", Style::default().fg(Color::Green)) // Visible/Online style
+                ("[✓] ", Style::default().fg(Color::Green)) // Green check for visible/online
             } else {
-                ("[✗] ", Style::default().fg(Color::Gray)) // Not visible/Offline style
+                ("[✗] ", Style::default().fg(Color::Gray))   // Gray X for invisible/offline
             };
             let line = Line::from(vec![
                 Span::styled(prefix, status_style),
@@ -421,12 +478,12 @@ impl App {
             items.push(ListItem::new(line));
         }
 
-        // Partition peers into online and offline lists
+        // Separate known peers into online and offline groups.
         let mut online_peers: Vec<_> = Vec::new();
         let mut offline_peers: Vec<_> = Vec::new();
 
         for (peer_id, peer_info) in self.peers.iter() {
-            // Exclude self from the peer lists
+            // Don't list ourselves in the peer list.
             if Some(*peer_id) == self.local_peer_id {
                 continue;
             }
@@ -436,22 +493,24 @@ impl App {
             }
         }
 
-        // Sort online and offline peers by PeerId (base58 representation)
+        // Sort peers alphabetically within each group based on their PeerId string.
         online_peers.sort_by_key(|(id, _)| id.to_base58());
         offline_peers.sort_by_key(|(id, _)| id.to_base58());
 
-        // Helper closure to create a list item line
+        // Helper function to create a `ListItem` for a peer.
         let create_list_item = |peer_id: &PeerId, peer_info: &PeerInfo| {
             let id_str = peer_id.to_base58();
             let len = id_str.len();
             let start_index = len.saturating_sub(6);
             let id_suffix = format!("(...{})", &id_str[start_index..]);
 
+            // Use nickname if available, otherwise "Unknown User".
             let display_name = match &peer_info.nickname {
                 Some(nickname) => format!("{} {}", nickname, id_suffix),
-                None => format!("Unknown User {}", id_suffix),
+                None => format!("Unknown {}", id_suffix), // Shorter "Unknown"
             };
 
+            // Set status indicator based on `peer_info.status`.
             let (prefix, status_style) = match peer_info.status {
                 OnlineStatus::Online => ("[✓] ", Style::default().fg(Color::Green)),
                 OnlineStatus::Offline => ("[✗] ", Style::default().fg(Color::Gray)),
@@ -464,49 +523,53 @@ impl App {
             ListItem::new(line)
         };
 
-        // Add online peers to the list
+        // Add online peers to the list items.
         for (peer_id, peer_info) in online_peers {
             items.push(create_list_item(peer_id, peer_info));
         }
 
-        // Add offline peers to the list
+        // Add offline peers below the online ones.
         for (peer_id, peer_info) in offline_peers {
             items.push(create_list_item(peer_id, peer_info));
         }
 
-        // Create the list widget with the generated items.
-        // TODO: Implement scroll state handling if the list becomes long.
+        // Create the `List` widget from the prepared items.
+        // Note: Scrolling is not implemented for this list yet.
         let users_list = List::new(items);
-        // Render the list within the inner area
+        // Draw the list into the inner area of the users block.
         users_list.render(inner_area, buf);
     }
 
-    /// Renders the chat pane.
+    /// Draws the chat pane, including the message history and the chat input box.
     fn render_chat_pane(&self, area: Rect, buf: &mut Buffer) {
         let focused_style = Style::default().fg(Color::Yellow);
         let unfocused_style = Style::default();
         let is_focused = self.focused_pane == FocusPane::Chat;
 
-        // Determine chat title based on context
+        // Title changes depending on whether it's global or private chat.
         let chat_title_text = match &self.current_chat_context {
             ChatContext::Global => " Global Chat ".to_string(),
+            // Show nickname in title if available.
             ChatContext::Private { target_nickname: Some(nick), .. } => format!(" Private Chat ({}) ", nick),
-            ChatContext::Private { .. } => " Private Chat (Unknown User) ".to_string(), // Use "Unknown User" if nickname is None
+            // Fallback if nickname isn't known for the private chat partner.
+            ChatContext::Private { .. } => " Private Chat (Unknown User) ".to_string(),
         };
         let chat_title = chat_title_text.bold();
 
+        // Create the main block for the chat area.
         let chat_block = Block::bordered()
             .title(chat_title)
             .border_set(border::THICK)
             .border_style(if is_focused { focused_style } else { unfocused_style });
 
-        // Layout within the chat block (Messages + Input)
+        // Divide the chat area vertically: messages and input box.
         let chat_inner_area = chat_block.inner(area);
-        chat_block.render(area, buf); // Render block border first
+        // Draw the block borders and title first.
+        chat_block.render(area, buf);
 
         let chat_chunks = Layout::vertical([
-            Constraint::Min(1),      // Area for messages
-            Constraint::Length(3), // Area for chat input box
+            Constraint::Min(1),      // Message area takes remaining space.
+            Constraint::Length(3), // Chat input area is fixed height.
         ])
         .split(chat_inner_area);
 
@@ -514,102 +577,144 @@ impl App {
         let input_area = chat_chunks[1];
 
         // --- Render Chat Messages ---
+        // Helper function to format a single `ChatMessage` into a display `Line`.
+        // Takes ownership of data it needs to avoid lifetime issues with borrows inside the map closure.
+        let format_message_line = |msg: &ChatMessage, local_peer_id: Option<PeerId>| -> Line {
+            // Display "You" for messages sent by the local user.
+            let sender_display: String = if Some(msg.sender_id) == local_peer_id {
+                "You".to_string()
+            } else {
+                // Otherwise, use nickname or a shortened PeerId.
+                msg.sender_nickname.clone().unwrap_or_else(|| {
+                    let id_str = msg.sender_id.to_base58();
+                    let len = id_str.len();
+                    // Show "user(...last6)" if nickname is unknown.
+                    format!("user(...{})", &id_str[len.saturating_sub(6)..])
+                })
+            };
+
+            // Clone the message content needed for the `Span`.
+            let content_owned: String = msg.content.clone();
+
+            // Construct the line: "Sender: Message Content"
+            Line::from(vec![
+                Span::styled(format!("{}: ", sender_display), Style::default().bold()), // Sender bold
+                Span::raw(content_owned), // Message content normal
+            ])
+        };
+
+        // Get the relevant message history based on the current chat context.
+        let messages: Vec<Line>;
         match &self.current_chat_context {
             ChatContext::Global => {
-                // Format messages from global_chat_history
-                let messages: Vec<Line> = self.global_chat_history.iter().map(|msg| {
-                    // Determine the sender display name
-                    let sender_display = if Some(msg.sender_id) == self.local_peer_id {
-                        "You".to_string() // Display "You" for own messages
-                    } else {
-                        msg.sender_nickname.clone().unwrap_or_else(|| {
-                            // Show last 6 chars of PeerId if nickname is unknown
-                            let id_str = msg.sender_id.to_base58();
-                            let len = id_str.len();
-                            format!("user(...{})", &id_str[len.saturating_sub(6)..])
-                        })
-                    };
-
-                    // Basic formatting: <sender>: content
-                    // TODO: Add timestamp formatting later if needed
-                    Line::from(vec![
-                        Span::styled(format!("{}: ", sender_display), Style::default().bold()),
-                        Span::raw(&msg.content),
-                    ])
-                }).collect();
-
-                // Update viewport height for scrolling calculation
-                // self.chat_viewport_height = messages_area.height as usize; // Set in main.rs
-
-                let chat_paragraph = Paragraph::new(messages)
-                    .scroll((self.chat_scroll as u16, 0)); // Apply vertical scroll
-                chat_paragraph.render(messages_area, buf);
+                // Use global history. Show placeholder if empty.
+                if self.global_chat_history.is_empty() {
+                    messages = vec![Line::from("No messages yet in global chat.".italic())];
+                } else {
+                    messages = self.global_chat_history.iter()
+                        .map(|msg| format_message_line(msg, self.local_peer_id))
+                        .collect();
+                }
             }
-            ChatContext::Private { .. } => {
-                // Placeholder for private chat rendering
-                let placeholder_text = Paragraph::new("Private chat messages coming soon...");
-                placeholder_text.render(messages_area, buf);
-                // TODO: Implement private chat history rendering
+            ChatContext::Private { target_peer_id, .. } => {
+                // Look up private history for the target peer. Show placeholder if none exists.
+                if let Some(history) = self.private_chat_histories.get(target_peer_id) {
+                    if history.is_empty() {
+                         messages = vec![Line::from("No messages yet in this private chat.".italic())];
+                    } else {
+                        messages = history.iter()
+                            .map(|msg| format_message_line(msg, self.local_peer_id))
+                            .collect();
+                    }
+                } else {
+                    // No history exists *at all* for this peer yet.
+                    messages = vec![Line::from("No messages yet in this private chat.".italic())];
+                }
             }
         }
 
-        // Render Chat Input Box within its area
+        // Create the paragraph for the chat messages.
+        let chat_paragraph = Paragraph::new(Text::from(messages))
+            .scroll((self.chat_scroll as u16, 0)); // Apply scroll offset.
+        // Draw the messages.
+        chat_paragraph.render(messages_area, buf);
+
+        // --- Render Chat Input Box ---
         let chat_input_paragraph = Paragraph::new(self.chat_input.as_str())
+            // Highlight text yellow when chat input is active.
             .style(match self.input_mode {
-                InputMode::Chat => Style::default().fg(Color::Yellow), // Highlight when active
+                InputMode::Chat => Style::default().fg(Color::Yellow),
                 _ => Style::default(),
             })
+            // Put it in its own bordered box.
             .block(Block::bordered().title(" Chat Input ".bold()));
+        // Draw the chat input box.
         chat_input_paragraph.render(input_area, buf);
     }
 }
 
-/// Implements the rendering logic for the `App` state using Ratatui.
+// This tells `ratatui` how to draw the entire `App` state.
+// It delegates the drawing of each pane to the helper methods above.
 impl Widget for &App {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        // Compute layout areas
+        // Calculate the areas for each pane using the layout function.
         let (chat_area, console_area, users_area) = layout_chunks(area);
 
-        // --- Render Panes using Helper Functions ---
+        // Call the rendering function for each pane.
         self.render_chat_pane(chat_area, buf);
         self.render_console_pane(console_area, buf);
         self.render_users_pane(users_area, buf);
 
-        // Note: Cursor setting logic remains in main.rs as it requires the `Frame` (`f`).
+        // Important: Setting the actual cursor position in the terminal
+        // needs to happen in the main loop (`main.rs`) because it requires
+        // access to the `Frame` object provided by `ratatui`'s drawing cycle.
     }
 }
 
-/// Events that drive the application's state changes.
+/// Represents different events that can happen in the application,
+/// either triggered by user input or by network activity.
+/// These events drive the state changes in the main application loop.
 #[derive(Debug)]
 pub enum AppEvent {
-    /// User keyboard input.
+    /// A key was pressed by the user.
     Input(event::KeyEvent),
-    /// Event originating from the libp2p Swarm.
+    /// An event occurred in the underlying libp2p network layer.
     Swarm(SwarmEvent<SwapBytesBehaviourEvent>),
-    /// User command to dial a peer (sent from UI to Swarm task).
+    /// User wants to connect to a specific peer address (from command input).
     Dial(Multiaddr),
-    /// Message to be logged in the UI (sent from Swarm task to UI).
+    /// A message needs to be displayed in the console log (often from network task).
     LogMessage(String),
-    /// A peer was discovered via mDNS.
+    /// A new peer was found on the local network via mDNS.
     PeerDiscovered(PeerId),
-    /// An mDNS record for a peer expired.
+    /// A peer previously found via mDNS hasn't been seen for a while and is considered gone.
     PeerExpired(PeerId),
-    /// User command to quit the application.
+    /// User wants to exit the application (e.g., pressed Ctrl+Q or typed /quit).
     Quit,
-    /// User submitted a chat message.
+    /// User pressed Enter in the chat input box, submitting a message.
     EnterChat(String),
-    /// User nickname has been updated (sent from UI to Swarm task).
+    /// User changed their nickname (needs to be broadcast to others).
     NicknameUpdated(PeerId, String),
-    /// User visibility has changed (sent from UI to Swarm task).
+    /// User changed their visibility status (online/offline).
     VisibilityChanged(bool),
-    /// Received a global chat message from the network.
-    GlobalMessageReceived { sender_id: PeerId, sender_nickname: Option<String>, content: String, timestamp_ms: u64 },
-    /// Request the Swarm task to publish a message to Gossipsub.
-    PublishGossipsub(Vec<u8>),
+    /// Received a chat message from the global topic.
+    GlobalMessageReceived {
+        sender_id: PeerId,
+        sender_nickname: Option<String>,
+        content: String,
+        timestamp_ms: u64,
+    },
+    /// UI requests the network task to publish a message to the global chat topic.
+    PublishGossipsub(Vec<u8>), // Raw bytes because Gossipsub deals with bytes
+    /// UI requests the network task to send a private message to a specific peer.
+    SendPrivateMessage { target_peer: PeerId, message: String },
+    /// Received a private chat message directly from a peer.
+    PrivateMessageReceived { sender_id: PeerId, content: String },
 }
 
-// Computes the layout rectangles for the chat, console, and users list.
+// Helper function to divide the main terminal area into the three panes:
+// Chat (top-left), Console (bottom-left), Users (right).
 pub fn layout_chunks(area: Rect) -> (Rect, Rect, Rect) {
+    // Split horizontally: 75% for left side (Chat + Console), 25% for Users list.
     let main_chunks = Layout::horizontal([
         Constraint::Percentage(75),
         Constraint::Percentage(25),
@@ -618,6 +723,7 @@ pub fn layout_chunks(area: Rect) -> (Rect, Rect, Rect) {
     let left_area = main_chunks[0];
     let users_area = main_chunks[1];
 
+    // Split the left side vertically: 67% for Chat, 33% for Console.
     let left_chunks = Layout::vertical([
         Constraint::Percentage(67),
         Constraint::Percentage(33),
@@ -625,5 +731,7 @@ pub fn layout_chunks(area: Rect) -> (Rect, Rect, Rect) {
     .split(left_area);
     let chat_area = left_chunks[0];
     let console_area = left_chunks[1];
+
+    // Return the calculated areas for each pane.
     (chat_area, console_area, users_area)
 }

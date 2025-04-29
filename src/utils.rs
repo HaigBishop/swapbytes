@@ -1,5 +1,5 @@
 /*
-Functions for file system operations.
+Functions for utility operations.
 */
 
 use std::fs;

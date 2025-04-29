@@ -7,7 +7,6 @@
 ---
 
 ## To Do
-- private chat
 - trade offer -> accept/decline
 - transfer of file
 - README.md & write-up

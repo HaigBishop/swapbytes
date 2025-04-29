@@ -1,45 +1,62 @@
+/*
+Handles all the slash commands (e.g. /ping, /setname, /chat).
+*/
+
+
 use crate::tui::{App, AppEvent, ChatContext, FocusPane, InputMode, OnlineStatus};
 use libp2p::{Multiaddr, PeerId};
 use std::time::Instant;
 
-/// Processes a user command input.
+/// Processes a command entered by the user in the console input.
 ///
-/// Takes the command string (without the leading '/') and a mutable reference
-/// to the application state. It modifies the state based on the command
-/// (e.g., logging output, changing settings) and returns an optional `AppEvent`
-/// if the command requires interaction with the main event loop or swarm task
-/// (e.g., Dial, Quit).
+/// Takes the raw text after the '/' and the main application state.
+/// It figures out the command and any arguments, updates the app state accordingly
+/// (like adding messages to the console log), and sometimes returns an `AppEvent`.
+/// These events signal actions that need to be handled elsewhere, like sending network
+/// messages (Dial, NicknameUpdate) or quitting the app.
 pub fn process_command(command_input: &str, app: &mut App) -> Option<AppEvent> {
+    // Split the input into the command name (like "ping") and the rest (arguments).
     let command_parts: Vec<&str> = command_input.trim().splitn(2, ' ').collect();
-    let command_name = *command_parts.get(0).unwrap_or(&"");
-    let args = command_parts.get(1).unwrap_or(&"").trim(); // Trim args
+    let command_name = *command_parts.get(0).unwrap_or(&""); // The command itself, e.g., "ping"
+    let args = command_parts.get(1).unwrap_or(&"").trim(); // The arguments, e.g., "12D..."
 
-    let mut event_to_send = None;
+    let mut event_to_send = None; // This will hold an event if the command needs to trigger a network action or quit.
 
+    // Figure out which command was entered and run the corresponding code.
     match command_name {
+        // Command: /ping <multiaddr>
+        // Tries to connect to and ping another peer using their network address.
         "ping" => {
             if args.is_empty() {
                 app.push("Usage: /ping <multiaddr>".to_string());
             } else {
+                // Try to understand the address the user provided.
                 match args.parse::<Multiaddr>() {
                     Ok(addr) => {
-                        app.pinging = true;
-                        app.ping_start_time = Some(Instant::now());
+                        // If the address is valid, start the ping process.
+                        app.pinging = true; // Set a flag to show we're waiting for a ping reply.
+                        app.ping_start_time = Some(Instant::now()); // Record when we started.
                         app.push(format!("Attempting ping to: {}", args));
+                        // Prepare an event to tell the network task to actually send the ping.
                         event_to_send = Some(AppEvent::Dial(addr));
                     }
                     Err(e) => {
+                        // If the address is not valid, tell the user.
                         app.push(format!("Invalid Multiaddr: {e}"));
                     }
                 }
             }
         }
+
+        // Command: /me
+        // Shows the user's own information like network addresses, Peer ID, download directory, and nickname.
         "me" => {
             // Show listening addresses
             app.push("You are listening on addresses:".to_string());
             if app.listening_addresses.is_empty() {
                 app.push("  (Not listening on any addresses right now)".to_string());
             } else {
+                // Format and print each address neatly.
                 let addrs_to_print: Vec<String> = app.listening_addresses
                     .iter()
                     .map(|addr| format!("  {}", addr))
@@ -66,60 +83,74 @@ pub fn process_command(command_input: &str, app: &mut App) -> Option<AppEvent> {
             // Show visibility status
             app.push(format!("Visibility: {}", if app.is_visible { "Online" } else { "Hidden" }));
         }
+
+        // Command: /setdir <absolute_path>
+        // Sets the directory where downloaded files will be saved.
         "setdir" => {
             if args.is_empty() {
                 app.push("Usage: /setdir <absolute_path>".to_string());
             } else {
-                // Call the verification function from utils
-                // Note: This blocks briefly. For heavy I/O, consider spawning a task.
+                // Check if the provided path is a valid, writable directory.
                 match crate::utils::verify_download_directory(args) {
                     Ok(verified_path) => {
+                        // If valid, update the app state and tell the user.
                         app.push(format!("Download directory set to: {}", verified_path.display()));
                         app.download_dir = Some(verified_path);
                     }
                     Err(err_msg) => {
+                        // If invalid, show the error message.
                         app.push(format!("Error setting directory: {}", err_msg));
                     }
                 }
             }
         }
+
+        // Command: /setname <nickname>
+        // Sets the user's nickname, which others will see in chat and user lists.
         "setname" => {
             if args.is_empty() {
                 app.push("Usage: /setname <nickname>".to_string());
             } else {
-                // Call the verification function from utils
+                // Check if the nickname meets the required format (length, characters).
                 match crate::utils::verify_nickname(args) {
                     Ok(verified_name) => {
-                        // Update the nickname in the UI
+                        // If valid, update the nickname in the app state.
                         app.push(format!("Nickname set to: {}", verified_name));
                         app.nickname = Some(verified_name.clone());
-                        // If the nickname is already taken that is okay, but warn the user
+
+                        // Check if someone else already has this nickname and warn the user.
                         if app.peers.values().any(|peer| peer.nickname == Some(verified_name.clone())) {
                             app.push(format!("Warning: Nickname '{}' is already taken by another user.", verified_name));
                         }
-                        // Send update event to swarm task
+
+                        // Prepare an event to tell the network task about the new nickname,
+                        // so it can be included in heartbeats.
                         event_to_send = Some(AppEvent::NicknameUpdated(app.local_peer_id.unwrap(), verified_name));
                     }
                     Err(err_msg) => {
+                        // If the nickname is invalid, show the error message.
                         app.push(format!("Error setting nickname: {}", err_msg));
                     }
                 }
             }
         }
+
+        // Command: /chat <nickname|global>
+        // Switches the chat view to either a private chat with a specific user (by nickname) or the global chat.
         "chat" => {
             if args.is_empty() {
                 app.push("Usage: /chat <nickname|global>".to_string());
             } else if args.eq_ignore_ascii_case("global") {
-                // Switch to Global Chat
+                // Switch to the global chat context.
                 app.current_chat_context = ChatContext::Global;
                 app.push("Switched to global chat.".to_string());
-                // Focus chat pane and enter chat mode
+                // Automatically focus the chat pane and enter chat input mode.
                 app.focused_pane = FocusPane::Chat;
                 app.input_mode = InputMode::Chat;
                 app.chat_input.clear();
                 app.reset_chat_cursor();
             } else {
-                // Try to find peer by nickname (case-insensitive)
+                // Try to find the peer by the provided nickname (case-insensitive).
                 let target_name_lower = args.to_lowercase();
                 let matches: Vec<(PeerId, Option<String>)> = app
                     .peers
@@ -128,34 +159,36 @@ pub fn process_command(command_input: &str, app: &mut App) -> Option<AppEvent> {
                         info.nickname
                             .as_ref()
                             .filter(|nick| nick.to_lowercase() == target_name_lower)
-                            .map(|nick| (*id, Some(nick.clone())))
+                            .map(|nick| (*id, Some(nick.clone()))) // Grab the PeerId and the actual nickname casing.
                     })
                     .collect();
 
                 match matches.len() {
                     0 => {
+                        // No user found with that nickname.
                         app.push(format!("Error: User '{}' not found.", args));
                     }
                     1 => {
-                        // Exactly one match
+                        // Exactly one user found. Switch to private chat with them.
                         let (peer_id, nickname) = matches.into_iter().next().unwrap();
                         let display_name = nickname.clone().unwrap_or_else(|| "Unknown User".to_string());
                         app.current_chat_context = ChatContext::Private { target_peer_id: peer_id, target_nickname: nickname };
                         app.push(format!("Switched chat to {}", display_name));
-                        // Focus chat pane and enter chat mode
+                        // Focus chat pane and enter chat input mode.
                         app.focused_pane = FocusPane::Chat;
                         app.input_mode = InputMode::Chat;
                         app.chat_input.clear();
                         app.reset_chat_cursor();
                     }
                     _ => {
-                        // Multiple matches, pick the first and warn
+                        // Multiple users found with similar nicknames. Pick the first one and warn.
+                        // TODO: Maybe list the matches and ask the user to be more specific?
                         app.push(format!("Warning: Multiple users found matching '{}'. Connecting to the first one.", args));
                         let (peer_id, nickname) = matches.into_iter().next().unwrap();
                         let display_name = nickname.clone().unwrap_or_else(|| "Unknown User".to_string());
                         app.current_chat_context = ChatContext::Private { target_peer_id: peer_id, target_nickname: nickname };
                         app.push(format!("Switched chat to {}", display_name));
-                        // Focus chat pane and enter chat mode
+                        // Focus chat pane and enter chat input mode.
                         app.focused_pane = FocusPane::Chat;
                         app.input_mode = InputMode::Chat;
                         app.chat_input.clear();
@@ -164,42 +197,63 @@ pub fn process_command(command_input: &str, app: &mut App) -> Option<AppEvent> {
                 }
             }
         }
+
+        // Command: /global
+        // A shortcut to switch to the global chat view.
         "global" => {
-            // Switch to Global Chat (same logic as /chat global)
+            // Same logic as `/chat global`.
             app.current_chat_context = ChatContext::Global;
             app.push("Switched to global chat.".to_string());
-            // Focus chat pane and enter chat mode
+            // Focus chat pane and enter chat input mode.
             app.focused_pane = FocusPane::Chat;
             app.input_mode = InputMode::Chat;
             app.chat_input.clear();
             app.reset_chat_cursor();
         }
+
+        // Command: /forget
+        // Clears the list of known peers. Useful if the list gets cluttered or outdated.
         "forget" => {
             let num_peers = app.peers.len();
             app.peers.clear();
             app.push(format!("Forgot {} known peers.", num_peers));
         }
+
+        // Command: /hide
+        // Makes the user appear offline to others by stopping heartbeat broadcasts.
         "hide" => {
             if app.is_visible {
-                app.is_visible = false;
+                app.is_visible = false; // Update the local visibility state.
                 app.push("You are now hidden. Use /show to become visible again.".to_string());
+                // Tell the network task to stop sending heartbeats.
                 event_to_send = Some(AppEvent::VisibilityChanged(false));
             } else {
                 app.push("You are already hidden.".to_string());
             }
         }
+
+        // Command: /show
+        // Makes the user appear online again by resuming heartbeat broadcasts.
         "show" => {
             if !app.is_visible {
-                app.is_visible = true;
+                app.is_visible = true; // Update the local visibility state.
                 app.push("You are now visible.".to_string());
+                // Tell the network task to start sending heartbeats again.
                 event_to_send = Some(AppEvent::VisibilityChanged(true));
             } else {
                 app.push("You are already visible.".to_string());
             }
         }
+
+        // Command: /quit or /q
+        // Exits the application gracefully.
         "quit" | "q" => {
+            // Prepare an event to signal the main loop to shut down.
             event_to_send = Some(AppEvent::Quit);
         }
+
+        // Command: /help or /h
+        // Displays a list of available commands and their usage.
         "help" | "h" => {
             app.push("SwapBytes Commands:".to_string());
             app.push("  /me               - Show my info (addrs, dir, nickname).".to_string());
@@ -216,18 +270,21 @@ pub fn process_command(command_input: &str, app: &mut App) -> Option<AppEvent> {
             // Add other commands here as needed
             app.push("  /help             - Show this help message.".to_string());
         }
+
+        // Command: /who <nickname>
+        // Shows details about a specific user identified by their nickname.
         "who" => {
             if args.is_empty() {
                 app.push("Usage: /who <nickname>".to_string());
             } else {
                 let target_name_lower = args.to_lowercase();
 
-                // Check if the user is asking about themselves
+                // Check if the user is asking about themselves.
                 if Some(target_name_lower.clone()) == app.nickname.as_ref().map(|n| n.to_lowercase()) {
                     app.push("That is your nickname. Use /me to see your own information.".to_string());
                 } else {
-                    // Collect matching peer information immutably first
-                    let now = Instant::now(); // Capture time for 'last seen' calculation
+                    // Find all peers matching the nickname (case-insensitive).
+                    let now = Instant::now(); // Get current time to calculate 'last seen' duration.
                     let matches: Vec<_> = app
                         .peers
                         .iter()
@@ -235,11 +292,11 @@ pub fn process_command(command_input: &str, app: &mut App) -> Option<AppEvent> {
                             info.nickname
                                 .as_ref()
                                 .filter(|nick| nick.to_lowercase() == target_name_lower)
-                                .map(|nick| (*id, nick.clone(), info.status.clone(), info.last_seen)) // Collect needed data
+                                .map(|nick| (*id, nick.clone(), info.status.clone(), info.last_seen)) // Collect necessary info.
                         })
                         .collect();
 
-                    // Now push messages mutably
+                    // Display the information found.
                     match matches.len() {
                         0 => {
                             app.push(format!("Error: User '{}' not found.", args));
@@ -250,6 +307,7 @@ pub fn process_command(command_input: &str, app: &mut App) -> Option<AppEvent> {
                                 app.push("--- User ---".to_string());
                                 app.push(format!("  Nickname: {}", nickname));
                                 app.push(format!("  Peer ID: {}", peer_id));
+                                // Format the status string to include how long ago they were last seen if offline.
                                 let status_str = match status {
                                     OnlineStatus::Online => "Online".to_string(),
                                     OnlineStatus::Offline => {
@@ -264,14 +322,18 @@ pub fn process_command(command_input: &str, app: &mut App) -> Option<AppEvent> {
                 }
             }
         }
-        // Unknown command
+
+        // Handle any input that doesn't match a known command.
         _ => {
-             if !command_name.is_empty() { // Only show unknown if not empty
+             // Only show the error if the user actually typed something (not just "/").
+             if !command_name.is_empty() {
                 app.push(format!("Unknown command: {}", command_name));
                 app.push("Type /help for a list of commands.".to_string());
             }
+            // If the input was empty (e.g., user just typed "/" and hit enter), do nothing.
         }
     }
 
+    // Return the event we prepared, if any.
     event_to_send
-} 
+}

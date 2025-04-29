@@ -1,4 +1,4 @@
-use crate::tui::{App, AppEvent, ChatContext, FocusPane, InputMode};
+use crate::tui::{App, AppEvent, ChatContext, FocusPane, InputMode, OnlineStatus};
 use libp2p::{Multiaddr, PeerId};
 use std::time::Instant;
 
@@ -211,9 +211,58 @@ pub fn process_command(command_input: &str, app: &mut App) -> Option<AppEvent> {
             app.push("  /forget           - Forget all known peers.".to_string());
             app.push("  /hide             - Set your status to appear offline.".to_string());
             app.push("  /show             - Set your status to appear online.".to_string());
+            app.push("  /who <name>       - Show information about a specific user.".to_string());
             app.push("  /quit             - Exit SwapBytes.".to_string());
             // Add other commands here as needed
             app.push("  /help             - Show this help message.".to_string());
+        }
+        "who" => {
+            if args.is_empty() {
+                app.push("Usage: /who <nickname>".to_string());
+            } else {
+                let target_name_lower = args.to_lowercase();
+
+                // Check if the user is asking about themselves
+                if Some(target_name_lower.clone()) == app.nickname.as_ref().map(|n| n.to_lowercase()) {
+                    app.push("That is your nickname. Use /me to see your own information.".to_string());
+                } else {
+                    // Collect matching peer information immutably first
+                    let now = Instant::now(); // Capture time for 'last seen' calculation
+                    let matches: Vec<_> = app
+                        .peers
+                        .iter()
+                        .filter_map(|(id, info)| {
+                            info.nickname
+                                .as_ref()
+                                .filter(|nick| nick.to_lowercase() == target_name_lower)
+                                .map(|nick| (*id, nick.clone(), info.status.clone(), info.last_seen)) // Collect needed data
+                        })
+                        .collect();
+
+                    // Now push messages mutably
+                    match matches.len() {
+                        0 => {
+                            app.push(format!("Error: User '{}' not found.", args));
+                        }
+                        count => {
+                            app.push(format!("Found {} users matching '{}':", count, args));
+                            for (peer_id, nickname, status, last_seen) in matches {
+                                app.push("--- User ---".to_string());
+                                app.push(format!("  Nickname: {}", nickname));
+                                app.push(format!("  Peer ID: {}", peer_id));
+                                let status_str = match status {
+                                    OnlineStatus::Online => "Online".to_string(),
+                                    OnlineStatus::Offline => {
+                                        let secs_ago = now.duration_since(last_seen).as_secs();
+                                        format!("Offline (Last seen: {} seconds ago)", secs_ago)
+                                    }
+                                };
+                                app.push(format!("  Status: {}", status_str));
+                            }
+                        }
+                    }
+                }
+            }
         }
         // Unknown command
         _ => {

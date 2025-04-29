@@ -826,10 +826,32 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             let _ = peer_id; // Avoid unused variable warning
                             // redraw = true; // Don't redraw if we ignore it
                         }
-                        AppEvent::NicknameUpdated(peer_id, nickname) => {
-                            if let Some(peer_info) = app.peers.get_mut(&peer_id) {
-                                peer_info.nickname = Some(nickname);
+                        AppEvent::NicknameUpdated(peer_id, new_nickname) => {
+                            // Ignore updates for self
+                            if Some(peer_id) == app.local_peer_id {
+                                // We still need to update our own nickname in the swarm task if changed via command
+                                // but the UI state (app.nickname) is already updated by the command handler.
+                                // The swarm task gets a dedicated message for this.
+                            } else if let Some(peer_info) = app.peers.get_mut(&peer_id) {
+                                let old_nickname_opt = peer_info.nickname.clone(); // Clone old nickname option
+                                let new_nickname_opt = Some(new_nickname.clone()); // Wrap new nickname in Option
+
+                                // Check if the nickname actually changed and wasn't initially None
+                                let should_log = old_nickname_opt != new_nickname_opt && old_nickname_opt.is_some();
+
+                                // Always update the nickname in the peer info *before* logging
+                                peer_info.nickname = Some(new_nickname.clone()); // Update with cloned new nickname
                                 redraw = true;
+
+                                // Now log if necessary (app is no longer borrowed mutably by peer_info)
+                                if should_log {
+                                    let old_name = old_nickname_opt.unwrap_or_else(|| "Unknown".to_string()); // Should be Some due to check
+                                    let id_str = peer_id.to_base58();
+                                    let len = id_str.len();
+                                    let id_suffix = format!("(...{})", &id_str[len.saturating_sub(6)..]);
+                                    // Use the already updated nickname from the `new_nickname` variable
+                                    app.push(format!("Peer changed nickname: {} → {} {}", old_name, new_nickname, id_suffix));
+                                }
                             }
                             // Optionally log if the peer wasn't found, but for now, just ignore it.
                         }

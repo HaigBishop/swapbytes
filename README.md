@@ -9,7 +9,6 @@
 ## To Do
 - small UI things
     - notify when another user's nickname changes
-    - add /who <name> command which gives info about a user
 - private chat
 - trade offer -> accept/decline
 - transfer of file
@@ -139,6 +138,7 @@ It satisfies all baseline requirements for COSC 473 A2 and adds a polished text-
 | `/hide` / `/show` | global | Toggle your visibility in the Global User List. |
 | `/forget` | global | Clear the list of known peers (they will reappear on next heartbeat). |
 | `/ping <multiaddr>` | global | Ping a peer by `multiaddr`. |
+| `/who <name>`       | global       | Show information about a specific user by nickname. |
 | `/quit`           | global       | Quit the application    |
 
 ---

@@ -144,20 +144,28 @@ It satisfies all baseline requirements for COSC 473 A2 and adds a polished text-
 
 ---
 
-## Startup & Peer Discovery Flow
+## Application Usage Flow
 
-1. **Start-up**  
-   1. Uh..
-   2. Default **visibility ON**; first heartbeat sent immediately.
+1.  **Start-up:** The application generates a unique cryptographic identity (PeerId) and a default random nickname (e.g. `user1234`). It begins listening for incoming connections on available network interfaces. Default visibility is set to **ON**.
+2.  **Peer Discovery (mDNS):** The app uses the **mDNS** protocol to broadcast its presence and discover other SwapBytes users on the **local network (LAN)**. When another peer is discovered, it's added to the Users List, initially marked as online.
+3.  **Presence & Connection Maintenance (Gossipsub Heartbeats):** To maintain the online status and handle peers joining/leaving, the app uses **Gossipsub**:
+    *   If **visible** (`/show`, default), a lightweight **Heartbeat** message containing the current nickname is broadcast via Gossipsub every **2 seconds** (`HEARTBEAT_INTERVAL_SECS`).
+    *   Receiving any Gossipsub message (heartbeats or global chat) from a peer updates their `last_seen` time in the local state and well as that user's nickname.
+    *   A background task checks periodically (every 5s). If no message has been received from a peer for more than **8 seconds** (`PEER_TIMEOUT_SECS`), that peer is marked **offline** in the Users List.
+    *   Using `/hide` stops sending heartbeats, causing the user to appear offline to others after the timeout, while `/show` resumes heartbeats.
+4.  **Manual Connection (Ping):** If mDNS fails (e.g., firewall, different network, specific OS issues) or for direct testing, users can establish a connection manually using `/ping <multiaddr>`. The required multiaddress can be found using `/me` on the target peer. This uses the `ping::Behaviour` to check reachability and implicitly establishes a persistent connection if successful. For testing two instances on the **same machine**, using the `/ip4/127.0.0.1/...` address is the most reliable way.
+5.  **Global Chat (Gossipsub):** Messages typed into the chat pane while in the `Global Chat` context are packaged and published to the shared `"swapbytes-global-chat"` using **Gossipsub**. All connected peers receive these messages and display them.
+6.  **Private Chat & Trade (Request/Response):** Interacting with specific users privately (via `/chat <name>`) and managing file trades (`/offer`, `/accept`, `/decline`) is planned to use libp2p's direct **Request/Response** protocol. This ensures messages and file transfer commands are sent only between the two involved peers.
 
-2. **Heartbeat**  
-   - Every 2s a lightweight pub-sub (gossipsub) ping announces presence.  
-   - Peers missing > 8s marked **offline**.
+---
 
-3. **Chat**
-   - At any time a user can chat on the **Global Chat** visible to anyone.
-   - Users can open a **Private Chat** with a particular user, automatically notifying that user.
-   - Within a private chat users can trade files.
+## Peer Discovery Challenges
+
+Our app can automatically find other users on a local network using mDNS. This also usually works with multiple instances on the same machine. However sometimes, especially on MacOS, this auto-discovery might not work when running instances on the *same* machine without being connected to a larger network. If the apps don't see each other automatically, it's easy to connect them manually: just use the `/me` command in one instance to get its multiaddr, and then use `/ping <multiaddr>` in the other instance to connect. 
+
+You might also see a situation on certain restricted networks, like some university or corporate LANs, where peers *do* discover each other initially using their local network addresses. Despite this initial discovery, the network might block the specific communication protocols libp2p needs to establish a full, secure connection. This can lead to peers appearing online briefly in the user list but then quickly showing as offline because the connection handshake failed, preventing ongoing communication like heartbeats or chat messages from getting through.
+
+**Bottom line:** If instances do not connect or maintain a connection, try using `/ping <multiaddr>`  to initiate a stable connection.
 
 ---
 

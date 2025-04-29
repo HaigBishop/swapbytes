@@ -131,8 +131,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 _ = heartbeat_timer.tick() => {
                     // Only send heartbeat if visible
                     if is_visible {
-                        // Log
-                        // let _ = swarm_tx.send(AppEvent::LogMessage(format!("Sending heartbeat.")));
+                        // Log heartbeat sending
+                        // let _ = swarm_tx.send(AppEvent::LogMessage(format!("[Swarm] Sending heartbeat (visible: {})", is_visible)));
                         // Get current timestamp in milliseconds
                         let timestamp_ms = SystemTime::now()
                             .duration_since(UNIX_EPOCH)
@@ -231,6 +231,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                 // Attempt to deserialize the message
                                 match serde_json::from_slice::<Message>(&message.data) {
                                     Ok(deserialized_msg) => {
+                                        // Log raw message reception before processing
+                                        // let _ = swarm_tx.send(AppEvent::LogMessage(format!("[Swarm] Received Gossipsub msg ({} bytes) from {}", message.data.len(), peer_id)));
                                         match deserialized_msg {
                                             Message::Heartbeat { timestamp_ms: _, nickname } => {
                                                 // Send NicknameUpdated event if nickname is present
@@ -269,7 +271,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                     }
                                     Err(e) => {
                                         // Log deserialization error, but still forward raw event for presence
-                                        let _ = swarm_tx.send(AppEvent::LogMessage(format!("Failed to deserialize gossipsub message: {e}")));
+                                        let _ = swarm_tx.send(AppEvent::LogMessage(format!("[Swarm] Failed to deserialize gossipsub msg from {}: {}", peer_id, e)));
                                         let _ = swarm_tx.send(AppEvent::Swarm(SwarmEvent::Behaviour(SwapBytesBehaviourEvent::Gossipsub(gossipsub::Event::Message {
                                             propagation_source: peer_id,
                                             message_id: _id,
@@ -284,11 +286,32 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                 // (We handled Gossipsub::Message specifically above)
                                 if !matches!(other_behaviour_event, SwapBytesBehaviourEvent::Gossipsub(_)) {
                                      let _ = swarm_tx.send(AppEvent::Swarm(SwarmEvent::Behaviour(other_behaviour_event)));
+                                } else {
+                                    // Log ignored Gossipsub events
+                                    // let _ = swarm_tx.send(AppEvent::LogMessage(format!("[Swarm] Ignored Gossipsub event: {:?}", other_behaviour_event)));
                                 }
                                 // Ignore other Gossipsub event types for now (like Subscribed, Unsubscribed)
                             }
                             // Forward non-behaviour swarm events (like NewListenAddr, ConnectionEstablished, etc.)
                             other_swarm_event => {
+                                
+                                // Log specific connection events
+                                // match &other_swarm_event {
+                                //     SwarmEvent::ConnectionEstablished { peer_id, endpoint, .. } => {
+                                //         let _ = swarm_tx.send(AppEvent::LogMessage(format!("[Swarm] ConnectionEstablished: {} ({:?})", peer_id, endpoint.get_remote_address())));
+                                //     },
+                                //     SwarmEvent::ConnectionClosed { peer_id, cause, .. } => {
+                                //         let _ = swarm_tx.send(AppEvent::LogMessage(format!("[Swarm] ConnectionClosed: {} (Cause: {:?})", peer_id, cause)));
+                                //     },
+                                //     SwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {
+                                //         let _ = swarm_tx.send(AppEvent::LogMessage(format!("[Swarm] OutgoingConnectionError: {:?} ({})", peer_id, error)));
+                                //     },
+                                //     SwarmEvent::IncomingConnectionError { error, local_addr, send_back_addr, .. } => {
+                                //         let _ = swarm_tx.send(AppEvent::LogMessage(format!("[Swarm] IncomingConnectionError: {} (Local: {:?}, Remote: {:?})", error, local_addr, send_back_addr)));
+                                //     },
+                                //     _ => {} // Ignore others for now
+                                // }
+
                                 let _ = swarm_tx.send(AppEvent::Swarm(other_swarm_event));
                             }
                         }
@@ -474,14 +497,35 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                 }
 
                                 SwarmEvent::OutgoingConnectionError { error, .. } => {
-                                    // This logging is commented out to hide a harmless "Failed to negotiate transport protocol(s)" error
-                                    // Connection eventually succeeds via the LAN address, so the error can be safely ignored.
-                                    // This only happens during same-machine mDNS testing, therefore is not a real issue.
-                                    // app.push(format!("Outgoing connection error: {error}"));
-
-                                    // do something with the error to avoid unused warning
+                                    // Log in UI task as well
+                                    // app.push(format!("[UI] Outgoing connection error: {error}"));
                                     let _ = error;
+                                }
+                                // Add logging for ConnectionEstablished and ConnectionClosed here
+                                SwarmEvent::ConnectionEstablished { peer_id, endpoint, num_established, .. } => {
+                                    // app.push(format!("[UI] Connection Established with: {} ({}) (Total: {})", peer_id, endpoint.get_remote_address(), num_established));
+                                    // Mark peer as online immediately on connection
+                                     if let Some(peer_info) = app.peers.get_mut(&peer_id) {
+                                        peer_info.status = OnlineStatus::Online;
+                                        peer_info.last_seen = Instant::now(); // Also update last_seen
+                                    }
 
+                                    // Avoid unused variable warning
+                                    let _ = endpoint;
+                                    let _ = num_established;
+                                }
+                                SwarmEvent::ConnectionClosed { peer_id, cause, num_established, .. } => {
+                                    // app.push(format!("[UI] Connection Closed with: {} (Cause: {:?}) (Remaining: {})", peer_id, cause, num_established));
+                                    // Optionally mark as offline immediately on closure, depending on the cause
+                                    // if cause.is_some() { // Only mark offline if there was an error? Or always? Let's mark always for now.
+                                    //     if let Some(peer_info) = app.peers.get_mut(&peer_id) {
+                                    //         peer_info.status = OnlineStatus::Offline;
+                                    //     }
+                                    // }
+                                    // Avoid unused variable warning
+                                    let _ = peer_id;
+                                    let _ = cause;
+                                    let _ = num_established;
                                 }
                                 // Add other SwarmEvent variants as needed
                                 _ => {
@@ -804,10 +848,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             // Create the chat message struct
                             let chat_msg = tui::ChatMessage {
                                 sender_id,
-                                sender_nickname,
-                                content,
+                                sender_nickname: sender_nickname.clone(), // Clone nickname
+                                content: content.clone(), // Clone content
                                 timestamp_ms,
                             };
+                            // Log that we processed this specific event
+                            // app.log(format!("[UI] Processed GlobalMessage from {} ({})",
+                            //     sender_nickname.unwrap_or_else(|| format!("PeerID:{}", sender_id)),
+                            //     content));
+
                             // Add to history
                             app.global_chat_history.push(chat_msg);
 
@@ -838,13 +887,23 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 let mut changed = false;
                 let now = Instant::now();
                 let timeout = Duration::from_secs(PEER_TIMEOUT_SECS);
+                let mut timed_out_peers = Vec::new(); // Collect timed out peers
 
-                for peer_info in app.peers.values_mut() {
+                for (peer_id, peer_info) in app.peers.iter_mut() { // Iterate mutably
                     if peer_info.status == OnlineStatus::Online && now.duration_since(peer_info.last_seen) > timeout {
                         peer_info.status = OnlineStatus::Offline;
                         changed = true;
+                        timed_out_peers.push(*peer_id); // Store the PeerId
+                        // Log when timeout occurs - MOVED outside loop
+                        // app.push(format!("[UI] Marked peer {:?} offline due to timeout (> {:?})", peer_id, timeout));
                     }
                 }
+
+                // Log timed out peers after the loop
+                // if !timed_out_peers.is_empty() {
+                //     let peer_ids_str = timed_out_peers.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(", ");
+                //     app.push(format!("[UI] Marked peers offline due to timeout (> {:?}): {}", timeout, peer_ids_str));
+                // }
 
                 if changed {
                     redraw = true;

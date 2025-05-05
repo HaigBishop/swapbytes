@@ -7,8 +7,7 @@
 ---
 
 ## To Do
-- trade offer -> accept/decline
-- transfer of file
+- accept -> file transfer
 - README.md & write-up
 
 ---

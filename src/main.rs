@@ -235,7 +235,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             // Send the request
                             swarm.behaviour_mut().request_response.send_request(&target_peer, request);
                             // Log the attempt (optional)
-                            // let _ = swarm_tx.send(AppEvent::LogMessage(format!("Sent DeclineOffer request to {} for file {}", target_peer, filename)));
+                            // let _ = swarm_tx.send(AppEvent::LogMessage(format!("[Swarm Task] Sent DeclineOffer request to {} for file {}", target_peer, filename)));
+                        }
+                        // Handle accepting file offers
+                        AppEvent::SendAcceptOffer { target_peer, filename } => {
+                            let request = protocol::PrivateRequest::AcceptOffer { filename };
+                            // Send the request
+                            swarm.behaviour_mut().request_response.send_request(&target_peer, request);
+                            // Log the attempt (optional)
+                            // let _ = swarm_tx.send(AppEvent::LogMessage(format!("Sent AcceptOffer request to {} for file {}", target_peer, filename)));
                         }
                         // Ignore other commands if any were sent here by mistake
                         _ => {}
@@ -364,6 +372,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                                     if let Err(e) = swarm.behaviour_mut().request_response.send_response(channel, protocol::PrivateResponse::Ack) {
                                                         let _ = swarm_tx.send(AppEvent::LogMessage(format!("[Swarm] Error sending Ack response to {}: {:?}", peer, e)));
                                                     }
+                                                    // TODO: File Transfer - Step 2: Peer accepted our offer. Start listening/preparing to send file chunks.
+                                                    //    - Need to know the file path corresponding to `filename`.
+                                                    //    - Maybe initiate a separate stream or use Req/Res for chunk transfer?
                                                 }
                                                 // Handle incoming decline messages
                                                 protocol::PrivateRequest::DeclineOffer { filename } => {
@@ -376,6 +387,20 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                                         let _ = swarm_tx.send(AppEvent::LogMessage(format!("[Swarm] Error sending Ack response to {}: {:?}", peer, e)));
                                                     }
                                                 }
+                                                // Handle incoming accept offer messages
+                                                protocol::PrivateRequest::AcceptOffer { filename } => {
+                                                    // Notify the UI that the offer was accepted by the peer
+                                                    if let Err(e) = swarm_tx.send(AppEvent::FileOfferAccepted { peer_id: peer, filename }) {
+                                                        eprintln!("[Swarm] Error sending FileOfferAccepted to UI: {}", e);
+                                                    }
+                                                    // Acknowledge receipt of the accept message
+                                                    if let Err(e) = swarm.behaviour_mut().request_response.send_response(channel, protocol::PrivateResponse::Ack) {
+                                                        let _ = swarm_tx.send(AppEvent::LogMessage(format!("[Swarm] Error sending Ack response to {}: {:?}", peer, e)));
+                                                    }
+                                                    // TODO: File Transfer - Step 2: Peer accepted our offer. Start listening/preparing to send file chunks.
+                                                    //    - Need to know the file path corresponding to `filename`.
+                                                    //    - Maybe initiate a separate stream or use Req/Res for chunk transfer?
+                                                }
                                                 // Add other PrivateRequest variants later (e.g., Offer)
                                             }
                                         }
@@ -384,14 +409,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                                 protocol::PrivateResponse::Ack => {
                                                     // let _ = swarm_tx.send(AppEvent::LogMessage(format!("[Swarm] Received Ack for request {:?} from {}", request_id, peer)));
                                                 }
-                                                // Handle Accept/Decline responses later
                                                 protocol::PrivateResponse::AcceptOffer => {
-                                                     // TODO: Handle AcceptOffer response
-                                                     let _ = swarm_tx.send(AppEvent::LogMessage(format!("[Swarm] Received AcceptOffer for request {:?} from {}", request_id, peer)));
+                                                     // Received confirmation that our offer was accepted.
+                                                     // The actual notification happens when the *requester* receives AcceptOffer request.
+                                                     // This Ack just confirms *our* AcceptOffer *request* was received.
+                                                     // Placeholder: Log that we received acceptance ack
+                                                     // let _ = swarm_tx.send(AppEvent::LogMessage(format!("[Swarm] Received Ack for AcceptOffer request {:?}", request_id)));
                                                 }
                                                 protocol::PrivateResponse::DeclineOffer => {
-                                                     // TODO: Handle DeclineOffer response
-                                                     let _ = swarm_tx.send(AppEvent::LogMessage(format!("[Swarm] Received DeclineOffer for request {:?} from {}", request_id, peer)));
+                                                     // Received confirmation that our offer was declined.
+                                                     // The actual notification happens when the *requester* receives DeclineOffer request.
+                                                     // This Ack just confirms *our* DeclineOffer *request* was received.
+                                                     // Placeholder: Log that we received decline ack
+                                                     // let _ = swarm_tx.send(AppEvent::LogMessage(format!("[Swarm] Received Ack for DeclineOffer request {:?}", request_id)));
                                                 }
                                                 // Add other PrivateResponse variants later (e.g., Accept/Decline)
                                             }
@@ -769,6 +799,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                                         AppEvent::DeclineFileOffer { target_peer, filename } => {
                                                             let _ = cmd_tx.send(AppEvent::DeclineFileOffer { target_peer, filename });
                                                         }
+                                                        // Handle accepting file offers
+                                                        AppEvent::SendAcceptOffer { target_peer, filename } => {
+                                                            let _ = cmd_tx.send(AppEvent::SendAcceptOffer { target_peer, filename });
+                                                        }
                                                         // Ignore any other event types potentially returned by submit_command
                                                         _ => {}
                                                     }
@@ -1070,11 +1104,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         AppEvent::Dial(_) => {} // Handled by swarm task
                         AppEvent::Quit => {} // Already handled in Command mode Enter
                         AppEvent::VisibilityChanged(_) => {} // Handled by swarm task
-                        AppEvent::EnterChat(msg) => {
+                        AppEvent::EnterChat(_msg) => {
                             // Handle submitting a chat message
                             // For now, just log it to the console
-                            // TODO: Send this message over gossipsub
-                            app.push(format!("[CHAT SUBMITTED] {}", msg));
+                            // app.push(format!("[CHAT SUBMITTED] {}", msg));
                             redraw = true;
                         }
                         AppEvent::GlobalMessageReceived { sender_id, sender_nickname, content, timestamp_ms } => {
@@ -1171,9 +1204,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                     });
                                 app.push(format!("{} sent you a private message!", sender_display_name));
                             }
-
-                            // TODO: Potentially add a notification in the console log or users list?
-                            // app.pubytessh(format!("Received private message from {}", sender_id));
 
                             redraw = true;
                         }
@@ -1283,8 +1313,60 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
                             redraw = true;
                         }
+                        AppEvent::FileOfferAccepted { peer_id, filename } => {
+                            // Get peer's display name
+                            let peer_display_name = app.peers.get(&peer_id)
+                                .and_then(|info| info.nickname.clone())
+                                .unwrap_or_else(|| {
+                                    let id_str = peer_id.to_base58();
+                                    let len = id_str.len();
+                                    format!("user(...{})", &id_str[len.saturating_sub(6)..])
+                                });
+
+                            // Add message to console
+                            app.push(format!("{} accepted your offer for '{}'.", peer_display_name, filename));
+
+                            // Add message to the private chat history for that peer
+                            if let Some(history) = app.private_chat_histories.get_mut(&peer_id) {
+                                // Find the original OfferSent details to add RemoteOfferAccepted
+                                let mut offer_details_opt: Option<tui::PendingOfferDetails> = None;
+                                for item in history.iter() {
+                                    if let tui::PrivateChatItem::OfferSent(details) = item {
+                                        if details.filename == filename {
+                                            offer_details_opt = Some(details.clone());
+                                            break; // Found the matching offer
+                                        }
+                                    }
+                                }
+
+                                if let Some(offer_details) = offer_details_opt {
+                                    let current_len = history.len(); // Get length *before* adding
+                                    history.push(tui::PrivateChatItem::RemoteOfferAccepted(offer_details));
+
+                                    // Auto-scroll if viewing this chat
+                                    if let tui::ChatContext::Private { target_peer_id, .. } = &app.current_chat_context {
+                                        if *target_peer_id == peer_id {
+                                            let current_max_scroll = current_len.saturating_sub(app.chat_viewport_height.max(1));
+                                            if app.chat_scroll >= current_max_scroll {
+                                                let new_max_scroll = history.len().saturating_sub(app.chat_viewport_height.max(1));
+                                                app.chat_scroll = new_max_scroll;
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    app.log(format!("Warning: Could not find original OfferSent details for accepted file '{}' from {}", filename, peer_display_name));
+                                }
+                            } else {
+                                app.log(format!("Warning: No private chat history found for peer {} who accepted file '{}'.", peer_display_name, filename));
+                            }
+
+                            redraw = true;
+                        }
+                        AppEvent::SendAcceptOffer { .. } => {
+                            app.log("Warning: Received unexpected SendAcceptOffer event in UI loop.".to_string());
+                            redraw = true;
+                        }
                         AppEvent::DeclineFileOffer { .. } => {
-                            // This event should be sent TO the swarm task, not received here.
                             app.log("Warning: Received unexpected DeclineFileOffer event in UI loop.".to_string());
                             redraw = true;
                         }

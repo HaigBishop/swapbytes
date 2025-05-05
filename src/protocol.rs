@@ -54,7 +54,12 @@ pub enum PrivateRequest {
         filename: String,
         size_bytes: u64,
     },
+    /// Peer declines a file offer we previously sent them.
     DeclineOffer { filename: String },
+    /// Peer accepts a file offer we previously sent them.
+    AcceptOffer { filename: String },
+    // Potential future request types:
+    // RequestChunk { filename: String, chunk_index: u64 },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

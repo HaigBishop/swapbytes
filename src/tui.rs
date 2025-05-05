@@ -53,6 +53,10 @@ pub enum PrivateChatItem {
     OfferDeclined(PendingOfferDetails),
     /// A file offer sent by the local user that was declined by the remote peer.
     RemoteOfferDeclined(PendingOfferDetails),
+    /// A file offer that was accepted by the local user.
+    OfferAccepted(PendingOfferDetails),
+    /// A file offer sent by the local user that was accepted by the remote peer.
+    RemoteOfferAccepted(PendingOfferDetails),
 }
 
 /// How long the "Pinging..." indicator stays visible after sending a ping.
@@ -665,7 +669,7 @@ impl App {
                                         });
                                     // Line 1: Offer details
                                     all_lines.push(Line::from(vec![
-                                        Span::styled(">> ", Style::default().fg(Color::Green)),
+                                        Span::styled(">> ", Style::default().fg(Color::Blue)),
                                         Span::styled(format!("{}", sender_display), Style::default().bold()),
                                         Span::raw(format!(
                                             " offered file: '{}' ({}).",
@@ -682,7 +686,7 @@ impl App {
                                 PrivateChatItem::OfferSent(offer_details) => {
                                     // Format the sent offer details into a single line
                                     all_lines.push(Line::from(vec![
-                                        Span::styled(">> ", Style::default().fg(Color::Green)),
+                                        Span::styled(">> ", Style::default().fg(Color::Blue)),
                                         Span::styled("You", Style::default().bold()),
                                         Span::raw(format!(
                                             " offered file: '{}' ({}).",
@@ -694,7 +698,7 @@ impl App {
                                 PrivateChatItem::OfferDeclined(offer_details) => {
                                     // Format the declined offer details into a single line
                                     all_lines.push(Line::from(vec![
-                                        Span::styled("<< ", Style::default().fg(Color::Red)), // Use different indicator/color
+                                        Span::styled("<< ", Style::default().fg(Color::Red)),
                                         Span::styled("You", Style::default().bold()),
                                         Span::raw(format!(
                                             " declined file: '{}' ({}).",
@@ -717,6 +721,54 @@ impl App {
                                         Span::styled(format!("{}", peer_display_name), Style::default().bold()),
                                         Span::raw(format!(
                                             " declined file: '{}' ({}).",
+                                            offer_details.filename,
+                                            crate::utils::format_bytes(offer_details.size_bytes)
+                                        )),
+                                    ]));
+                                }
+                                PrivateChatItem::OfferAccepted(offer_details) => {
+                                    // Find the peer's display name
+                                    let target_peer_id = match &self.current_chat_context {
+                                        ChatContext::Private { target_peer_id, .. } => *target_peer_id,
+                                        _ => { /* Should not happen in this arm */ return; }
+                                    };
+                                    let peer_display_name = self.peers.get(&target_peer_id)
+                                        .and_then(|p| p.nickname.clone())
+                                        .unwrap_or_else(|| {
+                                            let id_str = target_peer_id.to_base58();
+                                            let len = id_str.len();
+                                            format!("user(...{})", &id_str[len.saturating_sub(6)..])
+                                        });
+                                    // Format the remotely accepted offer details
+                                    all_lines.push(Line::from(vec![
+                                        Span::styled(">> ", Style::default().fg(Color::Green)), // Use Green for accepted
+                                        Span::styled(format!("{}", peer_display_name), Style::default().bold()),
+                                        Span::raw(format!(
+                                            " accepted file: '{}' ({}).",
+                                            offer_details.filename,
+                                            crate::utils::format_bytes(offer_details.size_bytes)
+                                        )),
+                                    ]));
+                                }
+                                PrivateChatItem::RemoteOfferAccepted(offer_details) => {
+                                    // Find the peer's display name
+                                    let target_peer_id = match &self.current_chat_context {
+                                        ChatContext::Private { target_peer_id, .. } => *target_peer_id,
+                                        _ => { /* Should not happen in this arm */ return; }
+                                    };
+                                    let peer_display_name = self.peers.get(&target_peer_id)
+                                        .and_then(|p| p.nickname.clone())
+                                        .unwrap_or_else(|| {
+                                            let id_str = target_peer_id.to_base58();
+                                            let len = id_str.len();
+                                            format!("user(...{})", &id_str[len.saturating_sub(6)..])
+                                        });
+                                    // Format the remotely accepted offer details
+                                    all_lines.push(Line::from(vec![
+                                        Span::styled(">> ", Style::default().fg(Color::Green)), // Use Green for accepted
+                                        Span::styled(format!("{}", peer_display_name), Style::default().bold()),
+                                        Span::raw(format!(
+                                            " accepted file: '{}' ({}).",
                                             offer_details.filename,
                                             crate::utils::format_bytes(offer_details.size_bytes)
                                         )),
@@ -811,6 +863,8 @@ pub enum AppEvent {
     SendFileOffer { target_peer: PeerId, file_path: PathBuf }, // Send PathBuf for now
     /// UI requests the network task to send a decline message for an offer.
     DeclineFileOffer { target_peer: PeerId, filename: String },
+    /// UI requests the network task to send an accept message for an offer.
+    SendAcceptOffer { target_peer: PeerId, filename: String },
     /// Received a private chat message directly from a peer.
     PrivateMessageReceived { sender_id: PeerId, content: String },
     /// Received a file offer directly from a peer.
@@ -821,6 +875,8 @@ pub enum AppEvent {
     },
     /// Received confirmation that a peer declined a file offer we sent.
     FileOfferDeclined { peer_id: PeerId, filename: String },
+    /// Received confirmation that a peer accepted a file offer we sent.
+    FileOfferAccepted { peer_id: PeerId, filename: String },
 }
 
 // Helper function to divide the main terminal area into the three panes:

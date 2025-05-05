@@ -182,7 +182,6 @@ pub fn process_command(command_input: &str, app: &mut App) -> Option<AppEvent> {
                     }
                     _ => {
                         // Multiple users found with similar nicknames. Pick the first one and warn.
-                        // TODO: Maybe list the matches and ask the user to be more specific?
                         app.push(format!("Warning: Multiple users found matching '{}'. Connecting to the first one.", args));
                         let (peer_id, nickname) = matches.into_iter().next().unwrap();
                         let display_name = nickname.clone().unwrap_or_else(|| "Unknown User".to_string());
@@ -270,6 +269,7 @@ pub fn process_command(command_input: &str, app: &mut App) -> Option<AppEvent> {
             app.push("  /quit             - Exit SwapBytes.".to_string());
             app.push("  /myoffers         - List pending incoming file offers.".to_string());
             app.push("  /decline          - Decline the offer from the current chat peer.".to_string());
+            app.push("  /accept           - Accept the offer from the current chat peer.".to_string());
             // Add other commands here as needed
             app.push("  /help             - Show this help message.".to_string());
         }
@@ -376,6 +376,83 @@ pub fn process_command(command_input: &str, app: &mut App) -> Option<AppEvent> {
                 } else {
                     // Not in a private chat context
                     app.push("Error: /decline can only be used in a private chat with a pending offer.".to_string());
+                }
+            }
+        }
+
+        // Command: /accept
+        // Accepts the most recent file offer received from the peer in the current private chat.
+        "accept" => {
+            if !args.is_empty() {
+                 app.push("Usage: /accept (takes no arguments)".to_string());
+            } else {
+                // Check if we are in a private chat context
+                if let ChatContext::Private { target_peer_id, target_nickname } = app.current_chat_context.clone() {
+                    let target_peer_id_cloned = target_peer_id; // Clone for use after borrow ends
+                    let target_nickname_cloned = target_nickname.clone(); // Clone for use after borrow ends
+                    let target_name = target_nickname_cloned.as_deref().unwrap_or("the peer");
+
+                    // Check if there is a pending offer from this specific peer
+                    // Use remove() to take ownership of the offer details if it exists.
+                    if let Some(offer_details) = app.pending_offers.remove(&target_peer_id_cloned) {
+                        // Offer existed and was removed. Now check download dir.
+                        match app.download_dir.as_deref() {
+                            None => {
+                                app.push("Error: Download directory not set. Use /setdir <path>.".to_string());
+                                // Put the offer back since we couldn't accept it!
+                                app.pending_offers.insert(target_peer_id_cloned, offer_details);
+                            }
+                            Some(dir_path) => {
+                                match crate::utils::verify_download_directory(dir_path.to_string_lossy().as_ref()) {
+                                    Ok(_) => {
+                                        // Directory is valid, proceed with acceptance steps 1 & 2.
+                                        app.push(format!(
+                                            "Accepted offer for '{}' from {}.",
+                                            offer_details.filename,
+                                            target_name
+                                        ));
+
+                                        // 2. Add an item to `app.private_chat_histories` indicating acceptance.
+                                        let history = app.private_chat_histories.entry(target_peer_id_cloned).or_default();
+                                        let current_len = history.len();
+                                        history.push(crate::tui::PrivateChatItem::OfferAccepted(offer_details.clone()));
+
+                                        // Auto-scroll chat view if we are viewing it
+                                        let current_max_scroll = current_len.saturating_sub(app.chat_viewport_height.max(1));
+                                        if app.chat_scroll >= current_max_scroll {
+                                            let new_max_scroll = history.len().saturating_sub(app.chat_viewport_height.max(1));
+                                            app.chat_scroll = new_max_scroll;
+                                        }
+
+                                        // 3. Send an AppEvent to the swarm task to initiate the transfer.
+                                        event_to_send = Some(AppEvent::SendAcceptOffer {
+                                            target_peer: target_peer_id_cloned,
+                                            filename: offer_details.filename // Send filename along
+                                        });
+                                        // TODO: File Transfer - Step 1: After accepting, prepare the UI/state for download.
+                                        //    - Maybe add a status indicator to the `OfferAccepted` chat item?
+                                        //    - Need to tell the swarm task to expect incoming data for this file.
+
+                                    }
+                                    Err(err_msg) => {
+                                        app.push(format!(
+                                            "Error: Download directory '{}' is invalid: {}. Use /setdir to set a valid one.",
+                                            dir_path.display(),
+                                            err_msg
+                                        ));
+                                        // Put the offer back since we couldn't accept it!
+                                        app.pending_offers.insert(target_peer_id_cloned, offer_details);
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        // No pending offer found from this user
+                        app.push(format!("You have no pending file offer from {}.", target_name));
+                    }
+                } else {
+                    // Not in a private chat context
+                    app.push("Error: /accept can only be used in a private chat with a pending offer.".to_string());
                 }
             }
         }

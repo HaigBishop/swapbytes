@@ -26,6 +26,8 @@ use libp2p::swarm::SwarmEvent;
 use libp2p::{Multiaddr, PeerId};
 // Import our custom network behavior events
 use crate::behavior::SwapBytesBehaviourEvent;
+// Import tokio filesystem for file handling in DownloadState
+use tokio::fs::File as TokioFile;
 
 /// Holds the details of a single chat message to be displayed.
 #[derive(Debug, Clone)]
@@ -57,6 +59,24 @@ pub enum PrivateChatItem {
     OfferAccepted(PendingOfferDetails),
     /// A file offer sent by the local user that was accepted by the remote peer.
     RemoteOfferAccepted(PendingOfferDetails),
+    /// An ongoing file transfer's progress.
+    TransferProgress {
+        filename: String,
+        received: u64,
+        total: u64,
+        // We might add start_time later for speed calculation
+    },
+    /// A successfully completed file transfer (download).
+    TransferComplete {
+        filename: String,
+        final_path: PathBuf,
+        size: u64,
+    },
+    /// A file transfer that failed.
+    TransferFailed {
+        filename: String,
+        error: String,
+    },
 }
 
 /// How long the "Pinging..." indicator stays visible after sending a ping.
@@ -121,6 +141,22 @@ pub struct PeerInfo {
 pub struct PendingOfferDetails {
     pub filename: String,
     pub size_bytes: u64,
+    pub path: PathBuf,
+}
+
+/// Represents the state of an ongoing file download.
+#[derive(Debug)] // Deriving Debug for App's Debug implementation
+pub struct DownloadState {
+    /// The local path where the file is being saved (likely temporary initially).
+    pub local_path: PathBuf,
+    /// The total expected size of the file in bytes.
+    pub total_size: u64,
+    /// How many bytes have been received so far.
+    pub received: u64,
+    /// The index of the next chunk we expect to receive.
+    pub next_chunk: u64,
+    /// The handle to the file being written to disk.
+    pub file: TokioFile, // Using Tokio's async File
 }
 
 /// Holds the entire state of the TUI application.
@@ -175,6 +211,10 @@ pub struct App {
     pub private_chat_histories: HashMap<PeerId, Vec<PrivateChatItem>>,
     /// Stores details of the latest pending file offer received from each peer.
     pub pending_offers: HashMap<PeerId, PendingOfferDetails>,
+    /// Stores the state of ongoing downloads, keyed by PeerId and then filename.
+    pub download_states: HashMap<PeerId, HashMap<String, DownloadState>>,
+    /// Stores the local path for files we are currently sending, keyed by (PeerId, filename).
+    pub outgoing_transfers: HashMap<(PeerId, String), PathBuf>,
 }
 
 // Provides default values for the `App` state when the application starts.
@@ -211,6 +251,8 @@ impl Default for App {
             chat_viewport_height: 2, // Small default chat height
             private_chat_histories: HashMap::new(), // No private chats yet
             pending_offers: HashMap::new(), // No pending offers initially
+            download_states: HashMap::new(), // No ongoing downloads initially
+            outgoing_transfers: HashMap::new(), // No outgoing transfers initially
         }
     }
 }
@@ -774,6 +816,38 @@ impl App {
                                         )),
                                     ]));
                                 }
+                                PrivateChatItem::TransferProgress { filename, received, total } => {
+                                    all_lines.push(Line::from(vec![
+                                        Span::styled(">> ", Style::default().fg(Color::Blue)),
+                                        Span::styled(format!("{}", filename), Style::default().bold()),
+                                        Span::raw(format!(
+                                            " in progress: {} / {} bytes",
+                                            received,
+                                            total
+                                        )),
+                                    ]));
+                                }
+                                PrivateChatItem::TransferComplete { filename, final_path, size } => {
+                                    all_lines.push(Line::from(vec![
+                                        Span::styled(">> ", Style::default().fg(Color::Green)),
+                                        Span::styled(format!("{}", filename), Style::default().bold()),
+                                        Span::raw(format!(
+                                            " completed: {} bytes, saved to {}",
+                                            size,
+                                            final_path.display()
+                                        )),
+                                    ]));
+                                }
+                                PrivateChatItem::TransferFailed { filename, error } => {
+                                    all_lines.push(Line::from(vec![
+                                        Span::styled("<< ", Style::default().fg(Color::Red)),
+                                        Span::styled(format!("{}", filename), Style::default().bold()),
+                                        Span::raw(format!(
+                                            " failed: {}",
+                                            error
+                                        )),
+                                    ]));
+                                }
                             }
                         }
                         messages = all_lines; // Assign the collected lines
@@ -864,7 +938,7 @@ pub enum AppEvent {
     /// UI requests the network task to send a decline message for an offer.
     DeclineFileOffer { target_peer: PeerId, filename: String },
     /// UI requests the network task to send an accept message for an offer.
-    SendAcceptOffer { target_peer: PeerId, filename: String },
+    SendAcceptOffer { target_peer: PeerId, filename: String, size_bytes: u64 },
     /// Received a private chat message directly from a peer.
     PrivateMessageReceived { sender_id: PeerId, content: String },
     /// Received a file offer directly from a peer.
@@ -877,6 +951,34 @@ pub enum AppEvent {
     FileOfferDeclined { peer_id: PeerId, filename: String },
     /// Received confirmation that a peer accepted a file offer we sent.
     FileOfferAccepted { peer_id: PeerId, filename: String },
+    /// Reports progress of an ongoing file download.
+    FileTransferProgress {
+        peer_id: PeerId,
+        filename: String,
+        received: u64, // Bytes received so far
+        total: u64,    // Total file size in bytes
+    },
+    /// Indicates a file transfer has completed successfully.
+    FileTransferComplete {
+        peer_id: PeerId,
+        filename: String,
+        path: PathBuf, // Final path where the file was saved
+        total_size: u64, // <<< Add total size
+    },
+    /// Indicates a file transfer has failed.
+    FileTransferFailed {
+        peer_id: PeerId,
+        filename: String,
+        error: String, // Reason for failure
+    },
+    /// UI informs swarm task of the current download directory.
+    DownloadDirChanged(Option<PathBuf>),
+    /// UI informs swarm task to register an outgoing file transfer.
+    RegisterOutgoingTransfer {
+        peer_id: PeerId,
+        filename: String,
+        path: PathBuf
+    },
 }
 
 // Helper function to divide the main terminal area into the three panes:

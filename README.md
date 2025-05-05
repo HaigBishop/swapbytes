@@ -7,7 +7,7 @@
 ---
 
 ## To Do
-- accept -> file transfer
+- tidy up
 - README.md & write-up
 
 ---

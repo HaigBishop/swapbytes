@@ -58,15 +58,29 @@ pub enum PrivateRequest {
     DeclineOffer { filename: String },
     /// Peer accepts a file offer we previously sent them.
     AcceptOffer { filename: String },
-    // Potential future request types:
-    // RequestChunk { filename: String, chunk_index: u64 },
+    // Request a specific chunk of a file.
+    RequestChunk {
+        filename: String,
+        chunk_index: u64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PrivateResponse {
     Ack, // General acknowledgement of message receipt
-    AcceptOffer, // Response to accept a file offer
-    DeclineOffer, // Response to decline a file offer
+    // Removed AcceptOffer/DeclineOffer variants as they are requests now.
+    // Response indicating a file chunk is being sent.
+    FileChunk {
+        filename: String,
+        chunk_index: u64,
+        data: Vec<u8>,
+        is_last: bool,
+    },
+    // Response indicating an error occurred during transfer.
+    TransferError {
+        filename: String,
+        error: String, // Simple error string for now
+    },
 }
 
 // --- 3. Message Codec ---
@@ -84,10 +98,10 @@ pub struct PrivateCodec {
 impl Default for PrivateCodec {
     fn default() -> Self {
         Self {
-            // Sensible default: Allow messages up to 1MB.
-            // Prevents accidentally sending/receiving huge messages.
+            // Use LengthDelimitedCodec for framing.
+            // Increase max frame length to 2 MiB to allow for larger chunks (e.g., 1MiB + overhead).
             inner: LengthDelimitedCodec::builder()
-                .max_frame_length(1024 * 1024) // 1 MiB
+                .max_frame_length(2 * 1024 * 1024) // 2 MiB
                 .new_codec(),
         }
     }
@@ -223,5 +237,35 @@ mod tests {
         let mut reader_cursor_res = Cursor::new(&buffer_res_vec);
         let decoded_response = codec.read_response(&protocol, &mut reader_cursor_res).await.unwrap();
         assert_eq!(response, decoded_response);
+
+        // Test FileChunk response
+        let chunk_response = PrivateResponse::FileChunk {
+            filename: "test.dat".to_string(),
+            chunk_index: 5,
+            data: vec![1, 2, 3, 4, 5],
+            is_last: false,
+        };
+        let mut buffer_chunk_vec: Vec<u8> = Vec::new();
+        {
+            let mut cursor_chunk = Cursor::new(&mut buffer_chunk_vec);
+            codec.write_response(&protocol, &mut cursor_chunk, chunk_response.clone()).await.unwrap();
+        }
+        let mut reader_cursor_chunk = Cursor::new(&buffer_chunk_vec);
+        let decoded_chunk_response = codec.read_response(&protocol, &mut reader_cursor_chunk).await.unwrap();
+        assert_eq!(chunk_response, decoded_chunk_response);
+
+        // Test TransferError response
+        let error_response = PrivateResponse::TransferError {
+            filename: "error.dat".to_string(),
+            error: "Failed to read file".to_string(),
+        };
+        let mut buffer_error_vec: Vec<u8> = Vec::new();
+        {
+            let mut cursor_error = Cursor::new(&mut buffer_error_vec);
+            codec.write_response(&protocol, &mut cursor_error, error_response.clone()).await.unwrap();
+        }
+        let mut reader_cursor_error = Cursor::new(&buffer_error_vec);
+        let decoded_error_response = codec.read_response(&protocol, &mut reader_cursor_error).await.unwrap();
+        assert_eq!(error_response, decoded_error_response);
     }
 }

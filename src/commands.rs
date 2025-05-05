@@ -95,7 +95,9 @@ pub fn process_command(command_input: &str, app: &mut App) -> Option<AppEvent> {
                     Ok(verified_path) => {
                         // If valid, update the app state and tell the user.
                         app.push(format!("Download directory set to: {}", verified_path.display()));
-                        app.download_dir = Some(verified_path);
+                        app.download_dir = Some(verified_path.clone()); // Clone here
+                        // Send event to swarm task
+                        event_to_send = Some(AppEvent::DownloadDirChanged(Some(verified_path)));
                     }
                     Err(err_msg) => {
                         // If invalid, show the error message.
@@ -299,6 +301,7 @@ pub fn process_command(command_input: &str, app: &mut App) -> Option<AppEvent> {
                                     |name| name.to_string_lossy().into_owned()
                                 ),
                                 size_bytes,
+                                path: verified_path.clone(),
                             };
 
                             // Add the sent offer to local history
@@ -427,7 +430,8 @@ pub fn process_command(command_input: &str, app: &mut App) -> Option<AppEvent> {
                                         // 3. Send an AppEvent to the swarm task to initiate the transfer.
                                         event_to_send = Some(AppEvent::SendAcceptOffer {
                                             target_peer: target_peer_id_cloned,
-                                            filename: offer_details.filename // Send filename along
+                                            filename: offer_details.filename, // Send filename along
+                                            size_bytes: offer_details.size_bytes // <<< Add size_bytes
                                         });
                                         // TODO: File Transfer - Step 1: After accepting, prepare the UI/state for download.
                                         //    - Maybe add a status indicator to the `OfferAccepted` chat item?

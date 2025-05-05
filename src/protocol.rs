@@ -54,6 +54,7 @@ pub enum PrivateRequest {
         filename: String,
         size_bytes: u64,
     },
+    DeclineOffer { filename: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

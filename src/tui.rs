@@ -49,6 +49,10 @@ pub enum PrivateChatItem {
     Offer(PendingOfferDetails), // Reuse the PendingOfferDetails struct
     /// A file offer initiated by the local user.
     OfferSent(PendingOfferDetails),
+    /// A file offer declined by the local user.
+    OfferDeclined(PendingOfferDetails),
+    /// A file offer sent by the local user that was declined by the remote peer.
+    RemoteOfferDeclined(PendingOfferDetails),
 }
 
 /// How long the "Pinging..." indicator stays visible after sending a ping.
@@ -661,7 +665,7 @@ impl App {
                                         });
                                     // Line 1: Offer details
                                     all_lines.push(Line::from(vec![
-                                        Span::styled(">> ", Style::default().fg(Color::Magenta)),
+                                        Span::styled(">> ", Style::default().fg(Color::Green)),
                                         Span::styled(format!("{}", sender_display), Style::default().bold()),
                                         Span::raw(format!(
                                             " offered file: '{}' ({}).",
@@ -678,10 +682,41 @@ impl App {
                                 PrivateChatItem::OfferSent(offer_details) => {
                                     // Format the sent offer details into a single line
                                     all_lines.push(Line::from(vec![
-                                        Span::styled(">> ", Style::default().fg(Color::Magenta)),
+                                        Span::styled(">> ", Style::default().fg(Color::Green)),
                                         Span::styled("You", Style::default().bold()),
                                         Span::raw(format!(
                                             " offered file: '{}' ({}).",
+                                            offer_details.filename,
+                                            crate::utils::format_bytes(offer_details.size_bytes)
+                                        )),
+                                    ]));
+                                }
+                                PrivateChatItem::OfferDeclined(offer_details) => {
+                                    // Format the declined offer details into a single line
+                                    all_lines.push(Line::from(vec![
+                                        Span::styled("<< ", Style::default().fg(Color::Red)), // Use different indicator/color
+                                        Span::styled("You", Style::default().bold()),
+                                        Span::raw(format!(
+                                            " declined file: '{}' ({}).",
+                                            offer_details.filename,
+                                            crate::utils::format_bytes(offer_details.size_bytes)
+                                        )),
+                                    ]));
+                                }
+                                PrivateChatItem::RemoteOfferDeclined(offer_details) => {
+                                    // Format the remotely declined offer details
+                                    let peer_display_name = self.peers.get(target_peer_id)
+                                        .and_then(|p| p.nickname.clone())
+                                        .unwrap_or_else(|| {
+                                            let id_str = target_peer_id.to_base58();
+                                            let len = id_str.len();
+                                            format!("user(...{})", &id_str[len.saturating_sub(6)..])
+                                        });
+                                    all_lines.push(Line::from(vec![
+                                        Span::styled("<< ", Style::default().fg(Color::Red)), // Different indicator
+                                        Span::styled(format!("{}", peer_display_name), Style::default().bold()),
+                                        Span::raw(format!(
+                                            " declined file: '{}' ({}).",
                                             offer_details.filename,
                                             crate::utils::format_bytes(offer_details.size_bytes)
                                         )),
@@ -774,6 +809,8 @@ pub enum AppEvent {
     SendPrivateMessage { target_peer: PeerId, message: String },
     /// UI requests the network task to send a file offer to a specific peer.
     SendFileOffer { target_peer: PeerId, file_path: PathBuf }, // Send PathBuf for now
+    /// UI requests the network task to send a decline message for an offer.
+    DeclineFileOffer { target_peer: PeerId, filename: String },
     /// Received a private chat message directly from a peer.
     PrivateMessageReceived { sender_id: PeerId, content: String },
     /// Received a file offer directly from a peer.
@@ -782,6 +819,8 @@ pub enum AppEvent {
         filename: String,
         size_bytes: u64,
     },
+    /// Received confirmation that a peer declined a file offer we sent.
+    FileOfferDeclined { peer_id: PeerId, filename: String },
 }
 
 // Helper function to divide the main terminal area into the three panes:

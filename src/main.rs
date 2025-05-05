@@ -229,6 +229,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                 }
                             }
                         }
+                        // Handle declining file offers
+                        AppEvent::DeclineFileOffer { target_peer, filename } => {
+                            let request = protocol::PrivateRequest::DeclineOffer { filename };
+                            // Send the request
+                            swarm.behaviour_mut().request_response.send_request(&target_peer, request);
+                            // Log the attempt (optional)
+                            // let _ = swarm_tx.send(AppEvent::LogMessage(format!("Sent DeclineOffer request to {} for file {}", target_peer, filename)));
+                        }
                         // Ignore other commands if any were sent here by mistake
                         _ => {}
                     }
@@ -353,6 +361,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                                     }
 
                                                     // Send Ack response to confirm receipt of the offer message
+                                                    if let Err(e) = swarm.behaviour_mut().request_response.send_response(channel, protocol::PrivateResponse::Ack) {
+                                                        let _ = swarm_tx.send(AppEvent::LogMessage(format!("[Swarm] Error sending Ack response to {}: {:?}", peer, e)));
+                                                    }
+                                                }
+                                                // Handle incoming decline messages
+                                                protocol::PrivateRequest::DeclineOffer { filename } => {
+                                                    // Notify the UI that the offer was declined by the peer
+                                                    if let Err(e) = swarm_tx.send(AppEvent::FileOfferDeclined { peer_id: peer, filename }) {
+                                                        eprintln!("[Swarm] Error sending FileOfferDeclined to UI: {}", e);
+                                                    }
+                                                    // Acknowledge receipt of the decline message
                                                     if let Err(e) = swarm.behaviour_mut().request_response.send_response(channel, protocol::PrivateResponse::Ack) {
                                                         let _ = swarm_tx.send(AppEvent::LogMessage(format!("[Swarm] Error sending Ack response to {}: {:?}", peer, e)));
                                                     }
@@ -745,6 +764,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                                         // Send SendFileOffer event to the swarm task
                                                         AppEvent::SendFileOffer { target_peer, file_path } => {
                                                             let _ = cmd_tx.send(AppEvent::SendFileOffer { target_peer, file_path });
+                                                        }
+                                                        // Send DeclineFileOffer event to the swarm task
+                                                        AppEvent::DeclineFileOffer { target_peer, filename } => {
+                                                            let _ = cmd_tx.send(AppEvent::DeclineFileOffer { target_peer, filename });
                                                         }
                                                         // Ignore any other event types potentially returned by submit_command
                                                         _ => {}
@@ -1207,6 +1230,63 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         AppEvent::SendFileOffer { .. } => {
                             // This event is sent TO the swarm task, should not be received here.
                             app.log("Warning: Received SendFileOffer event in UI loop.".to_string());
+                        }
+                        AppEvent::FileOfferDeclined { peer_id, filename } => {
+                            // Get peer's display name
+                            let peer_display_name = app.peers.get(&peer_id)
+                                .and_then(|info| info.nickname.clone())
+                                .unwrap_or_else(|| {
+                                    let id_str = peer_id.to_base58();
+                                    let len = id_str.len();
+                                    format!("user(...{})", &id_str[len.saturating_sub(6)..])
+                                });
+
+                            // Add message to console
+                            app.push(format!("{} declined your offer for '{}'.", peer_display_name, filename));
+
+                            // Add message to the private chat history for that peer
+                            if let Some(history) = app.private_chat_histories.get_mut(&peer_id) {
+                                // Find the original OfferSent details to add RemoteOfferDeclined
+                                // We need to iterate to find the size bytes associated with the filename
+                                let mut offer_details_opt: Option<tui::PendingOfferDetails> = None;
+                                for item in history.iter() {
+                                    if let tui::PrivateChatItem::OfferSent(details) = item {
+                                        if details.filename == filename {
+                                            offer_details_opt = Some(details.clone());
+                                            break; // Found the matching offer
+                                        }
+                                    }
+                                }
+
+                                if let Some(offer_details) = offer_details_opt {
+                                    let current_len = history.len(); // Get length *before* adding
+                                    history.push(tui::PrivateChatItem::RemoteOfferDeclined(offer_details));
+
+                                    // Auto-scroll if viewing this chat
+                                    if let tui::ChatContext::Private { target_peer_id, .. } = &app.current_chat_context {
+                                        if *target_peer_id == peer_id {
+                                            let current_max_scroll = current_len.saturating_sub(app.chat_viewport_height.max(1));
+                                            if app.chat_scroll >= current_max_scroll {
+                                                let new_max_scroll = history.len().saturating_sub(app.chat_viewport_height.max(1));
+                                                app.chat_scroll = new_max_scroll;
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    // Log if we couldn't find the original offer details (should not normally happen)
+                                    app.log(format!("Warning: Could not find original OfferSent details for declined file '{}' from {}", filename, peer_display_name));
+                                }
+                            } else {
+                                // Log if no history exists (also unusual if an offer was sent)
+                                app.log(format!("Warning: No private chat history found for peer {} who declined file '{}'.", peer_display_name, filename));
+                            }
+
+                            redraw = true;
+                        }
+                        AppEvent::DeclineFileOffer { .. } => {
+                            // This event should be sent TO the swarm task, not received here.
+                            app.log("Warning: Received unexpected DeclineFileOffer event in UI loop.".to_string());
+                            redraw = true;
                         }
                     }
                 } else {

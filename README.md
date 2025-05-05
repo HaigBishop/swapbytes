@@ -137,6 +137,7 @@ It satisfies all baseline requirements for COSC 473 A2 and adds a polished text-
 | `/ping <multiaddr>` | global | Ping a peer by `multiaddr`. |
 | `/who <name>`       | global       | Show information about a specific user by nickname. |
 | `/quit`           | global       | Quit the application    |
+| `/myoffers`       | global       | List pending incoming file offers. |
 
 ---
 

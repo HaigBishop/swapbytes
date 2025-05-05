@@ -40,6 +40,17 @@ pub struct ChatMessage {
     pub timestamp_ms: u64,
 }
 
+/// Represents an item displayed within a private chat history.
+#[derive(Debug, Clone)]
+pub enum PrivateChatItem {
+    /// A regular text message.
+    Message(ChatMessage),
+    /// A file offer received from the peer.
+    Offer(PendingOfferDetails), // Reuse the PendingOfferDetails struct
+    /// A file offer initiated by the local user.
+    OfferSent(PendingOfferDetails),
+}
+
 /// How long the "Pinging..." indicator stays visible after sending a ping.
 pub const PINGING_DURATION: Duration = Duration::from_millis(2000);
 
@@ -97,6 +108,13 @@ pub struct PeerInfo {
     pub last_seen: Instant,
 }
 
+/// Stores the details of a file offer that is waiting for acceptance/rejection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingOfferDetails {
+    pub filename: String,
+    pub size_bytes: u64,
+}
+
 /// Holds the entire state of the TUI application.
 /// This includes user input, logs, chat history, peer info, UI focus, etc.
 #[derive(Debug)]
@@ -146,7 +164,9 @@ pub struct App {
     /// The number of lines visible in the chat message area (updates on resize).
     pub chat_viewport_height: usize,
     /// Stores the history of private messages, keyed by the `PeerId` of the other participant.
-    pub private_chat_histories: HashMap<PeerId, Vec<ChatMessage>>,
+    pub private_chat_histories: HashMap<PeerId, Vec<PrivateChatItem>>,
+    /// Stores details of the latest pending file offer received from each peer.
+    pub pending_offers: HashMap<PeerId, PendingOfferDetails>,
 }
 
 // Provides default values for the `App` state when the application starts.
@@ -182,6 +202,7 @@ impl Default for App {
             chat_scroll: 0, // Start chat scrolled to the top
             chat_viewport_height: 2, // Small default chat height
             private_chat_histories: HashMap::new(), // No private chats yet
+            pending_offers: HashMap::new(), // No pending offers initially
         }
     }
 }
@@ -620,11 +641,55 @@ impl App {
                 // Look up private history for the target peer. Show placeholder if none exists.
                 if let Some(history) = self.private_chat_histories.get(target_peer_id) {
                     if history.is_empty() {
-                         messages = vec![Line::from("No messages yet in this private chat.".italic())];
+                        messages = vec![Line::from("No messages yet in this private chat.".italic())];
                     } else {
-                        messages = history.iter()
-                            .map(|msg| format_message_line(msg, self.local_peer_id))
-                            .collect();
+                        let mut all_lines: Vec<Line> = Vec::with_capacity(history.len()); // Pre-allocate roughly
+                        for item in history.iter() {
+                            match item {
+                                PrivateChatItem::Message(msg) => {
+                                    // Use the existing helper for messages
+                                    all_lines.push(format_message_line(msg, self.local_peer_id));
+                                }
+                                PrivateChatItem::Offer(offer_details) => {
+                                    // Format the offer details into two lines
+                                    let sender_display = self.peers.get(target_peer_id)
+                                        .and_then(|p| p.nickname.clone())
+                                        .unwrap_or_else(|| {
+                                             let id_str = target_peer_id.to_base58();
+                                             let len = id_str.len();
+                                             format!("user(...{})", &id_str[len.saturating_sub(6)..])
+                                        });
+                                    // Line 1: Offer details
+                                    all_lines.push(Line::from(vec![
+                                        Span::styled(">> ", Style::default().fg(Color::Magenta)),
+                                        Span::styled(format!("{}", sender_display), Style::default().bold()),
+                                        Span::raw(format!(
+                                            " offered file: '{}' ({}).",
+                                            offer_details.filename,
+                                            crate::utils::format_bytes(offer_details.size_bytes)
+                                        )),
+                                    ]));
+                                    // Line 2: Prompt
+                                    all_lines.push(Line::from(vec![
+                                        Span::raw("   "), // Indentation
+                                        Span::styled("Use /accept or /decline.", Style::default().fg(Color::Yellow).italic()),
+                                    ]));
+                                }
+                                PrivateChatItem::OfferSent(offer_details) => {
+                                    // Format the sent offer details into a single line
+                                    all_lines.push(Line::from(vec![
+                                        Span::styled(">> ", Style::default().fg(Color::Magenta)),
+                                        Span::styled("You", Style::default().bold()),
+                                        Span::raw(format!(
+                                            " offered file: '{}' ({}).",
+                                            offer_details.filename,
+                                            crate::utils::format_bytes(offer_details.size_bytes)
+                                        )),
+                                    ]));
+                                }
+                            }
+                        }
+                        messages = all_lines; // Assign the collected lines
                     }
                 } else {
                     // No history exists *at all* for this peer yet.
@@ -707,8 +772,16 @@ pub enum AppEvent {
     PublishGossipsub(Vec<u8>), // Raw bytes because Gossipsub deals with bytes
     /// UI requests the network task to send a private message to a specific peer.
     SendPrivateMessage { target_peer: PeerId, message: String },
+    /// UI requests the network task to send a file offer to a specific peer.
+    SendFileOffer { target_peer: PeerId, file_path: PathBuf }, // Send PathBuf for now
     /// Received a private chat message directly from a peer.
     PrivateMessageReceived { sender_id: PeerId, content: String },
+    /// Received a file offer directly from a peer.
+    FileOfferReceived {
+        sender_id: PeerId,
+        filename: String,
+        size_bytes: u64,
+    },
 }
 
 // Helper function to divide the main terminal area into the three panes:

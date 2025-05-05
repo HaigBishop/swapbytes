@@ -49,13 +49,18 @@ impl AsRef<str> for PrivateProtocol {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PrivateRequest {
     ChatMessage(String),
-    // TODO: Add Offer(String) for file transfer negotiation
+    // File offer including filename and size
+    Offer {
+        filename: String,
+        size_bytes: u64,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PrivateResponse {
-    Ack, // A simple "I got your message" acknowledgement.
-    // TODO: Add Accept/Decline for file transfer offers
+    Ack, // General acknowledgement of message receipt
+    AcceptOffer, // Response to accept a file offer
+    DeclineOffer, // Response to decline a file offer
 }
 
 // --- 3. Message Codec ---

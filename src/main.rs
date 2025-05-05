@@ -202,6 +202,33 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             // Log the attempt (optional)
                             // let _ = swarm_tx.send(AppEvent::LogMessage(format!("Sent private message request to {}", target_peer)));
                         }
+                        // Handle sending file offers
+                        AppEvent::SendFileOffer { target_peer, file_path } => {
+                            match std::fs::metadata(&file_path) {
+                                Ok(metadata) => {
+                                    // let _ = swarm_tx.send(AppEvent::LogMessage(format!("[Swarm Task] Preparing SendFileOffer event for {} to {}", file_path.display(), target_peer)));
+                                    if metadata.is_file() {
+                                        let size_bytes = metadata.len();
+                                        // Extract filename from path
+                                        let filename = file_path.file_name().map_or_else(
+                                            || "unknown_file".to_string(), // Fallback filename
+                                            |os_name| os_name.to_string_lossy().into_owned()
+                                        );
+
+                                        let request = protocol::PrivateRequest::Offer { filename, size_bytes };
+                                        // Send the request
+                                        swarm.behaviour_mut().request_response.send_request(&target_peer, request);
+                                        // Log after attempting send
+                                        // let _ = swarm_tx.send(AppEvent::LogMessage(format!("[Swarm Task] Attempted send_request (Offer) to {} for {}", target_peer, file_path.display())));
+                                    } else {
+                                        let _ = swarm_tx.send(AppEvent::LogMessage(format!("Error: Offer path is not a file: {}", file_path.display())));
+                                    }
+                                }
+                                Err(e) => {
+                                    let _ = swarm_tx.send(AppEvent::LogMessage(format!("Error getting file metadata for offer: {} ({})", file_path.display(), e)));
+                                }
+                            }
+                        }
                         // Ignore other commands if any were sent here by mistake
                         _ => {}
                     }
@@ -313,6 +340,23 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                                         let _ = swarm_tx.send(AppEvent::LogMessage(format!("[Swarm] Error sending Ack response to {}: {:?}", peer, e)));
                                                     }
                                                 }
+                                                // Handle incoming file offers
+                                                protocol::PrivateRequest::Offer { filename, size_bytes } => {
+                                                    // let _ = swarm_tx.send(AppEvent::LogMessage(format!("[Swarm Task] Received Offer request from {}: File '{}' ({} bytes)", peer, filename, size_bytes)));
+                                                    // Send FileOfferReceived event to UI task
+                                                    if let Err(e) = swarm_tx.send(AppEvent::FileOfferReceived {
+                                                        sender_id: peer,
+                                                        filename: filename.clone(), // Clone filename
+                                                        size_bytes,
+                                                    }) {
+                                                        eprintln!("[Swarm] Error sending FileOfferReceived to UI: {}", e);
+                                                    }
+
+                                                    // Send Ack response to confirm receipt of the offer message
+                                                    if let Err(e) = swarm.behaviour_mut().request_response.send_response(channel, protocol::PrivateResponse::Ack) {
+                                                        let _ = swarm_tx.send(AppEvent::LogMessage(format!("[Swarm] Error sending Ack response to {}: {:?}", peer, e)));
+                                                    }
+                                                }
                                                 // Add other PrivateRequest variants later (e.g., Offer)
                                             }
                                         }
@@ -321,6 +365,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                                 protocol::PrivateResponse::Ack => {
                                                     // let _ = swarm_tx.send(AppEvent::LogMessage(format!("[Swarm] Received Ack for request {:?} from {}", request_id, peer)));
                                                 }
+                                                // Handle Accept/Decline responses later
+                                                protocol::PrivateResponse::AcceptOffer => {
+                                                     // TODO: Handle AcceptOffer response
+                                                     let _ = swarm_tx.send(AppEvent::LogMessage(format!("[Swarm] Received AcceptOffer for request {:?} from {}", request_id, peer)));
+                                                }
+                                                protocol::PrivateResponse::DeclineOffer => {
+                                                     // TODO: Handle DeclineOffer response
+                                                     let _ = swarm_tx.send(AppEvent::LogMessage(format!("[Swarm] Received DeclineOffer for request {:?} from {}", request_id, peer)));
+                                                }
                                                 // Add other PrivateResponse variants later (e.g., Accept/Decline)
                                             }
                                             // Avoid request_id unused warning
@@ -328,7 +381,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                         }
                                     }
                                     Event::OutboundFailure { peer, request_id, error, connection_id: _ } => {
-                                        let _ = swarm_tx.send(AppEvent::LogMessage(format!("[Swarm] Outbound RequestResponse failure to {}: Request {:?}, Error: {}", peer, request_id, error)));
+                                        // Explicitly log outbound failures for RequestResponse
+                                        let _ = swarm_tx.send(AppEvent::LogMessage(format!("[Swarm Task] Outbound RequestResponse Failure to {}: ReqID {:?}, Error: {}", peer, request_id, error)));
                                     }
                                     Event::InboundFailure { peer, request_id, error, connection_id: _ } => {
                                         let _ = swarm_tx.send(AppEvent::LogMessage(format!("[Swarm] Inbound RequestResponse failure from {}: Request {:?}, Error: {}", peer, request_id, error)));
@@ -688,6 +742,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                                             app.push(format!("Command sent visibility change: {}", is_visible));
                                                             let _ = cmd_tx.send(AppEvent::VisibilityChanged(is_visible));
                                                         }
+                                                        // Send SendFileOffer event to the swarm task
+                                                        AppEvent::SendFileOffer { target_peer, file_path } => {
+                                                            let _ = cmd_tx.send(AppEvent::SendFileOffer { target_peer, file_path });
+                                                        }
                                                         // Ignore any other event types potentially returned by submit_command
                                                         _ => {}
                                                     }
@@ -827,7 +885,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                                                             
                                                             let history = app.private_chat_histories.entry(target_peer_id).or_default();
                                                             let current_len = history.len(); // Length before adding
-                                                            history.push(chat_msg);
+                                                            history.push(tui::PrivateChatItem::Message(chat_msg));
 
                                                             // Auto-scroll (since we are viewing this chat)
                                                             let current_max_scroll = current_len.saturating_sub(app.chat_viewport_height.max(1));
@@ -965,10 +1023,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
                                 // --- Update Private Chat History for this peer ---
                                 if let Some(history) = app.private_chat_histories.get_mut(&peer_id) {
-                                    for message in history.iter_mut() {
-                                        // Only update messages sent *by* this peer
-                                        if message.sender_id == peer_id {
-                                            message.sender_nickname = Some(new_nickname.clone());
+                                    for item in history.iter_mut() {
+                                        if let tui::PrivateChatItem::Message(message) = item {
+                                            // Only update messages sent *by* this peer
+                                            if message.sender_id == peer_id {
+                                                message.sender_nickname = Some(new_nickname.clone());
+                                            }
                                         }
                                     }
                                 }
@@ -1038,10 +1098,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         }
                         AppEvent::SendPrivateMessage { .. } => {
                             // This event is sent TO the swarm task, should not be received here.
-                            // Log if it happens, but otherwise ignore.
                             app.log("Warning: Received SendPrivateMessage event in UI loop.".to_string());
                         }
                         AppEvent::PrivateMessageReceived { sender_id, content } => {
+                            // app.log(format!("[UI Task] Received PrivateMessageReceived event from {}", sender_id));
                             // Get sender's nickname from peers map (if known)
                             let sender_nickname = app.peers.get(&sender_id).and_then(|info| info.nickname.clone());
 
@@ -1062,7 +1122,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             // Add message to the corresponding private history
                             let history = app.private_chat_histories.entry(sender_id).or_default();
                             let current_len = history.len(); // Get length before adding
-                            history.push(chat_msg);
+                            history.push(tui::PrivateChatItem::Message(chat_msg));
 
                             // Auto-scroll if the user is currently viewing this private chat
                             let mut notify_in_console = true; // Assume notification needed by default
@@ -1090,9 +1150,63 @@ async fn main() -> Result<(), Box<dyn Error>> {
                             }
 
                             // TODO: Potentially add a notification in the console log or users list?
-                            // app.push(format!("Received private message from {}", sender_id));
+                            // app.pubytessh(format!("Received private message from {}", sender_id));
 
                             redraw = true;
+                        }
+                        AppEvent::FileOfferReceived { sender_id, filename, size_bytes } => {
+                            // Get sender's display name (used for console notification)
+                            let sender_display_name = app.peers.get(&sender_id)
+                                .and_then(|info| info.nickname.clone())
+                                .unwrap_or_else(|| {
+                                    let id_str = sender_id.to_base58();
+                                    let len = id_str.len();
+                                    format!("user(...{})", &id_str[len.saturating_sub(6)..])
+                                });
+
+                            // Check if we are currently viewing the private chat with the sender
+                            let mut is_viewing_chat = false;
+                            if let tui::ChatContext::Private { target_peer_id, .. } = &app.current_chat_context {
+                                if *target_peer_id == sender_id {
+                                    is_viewing_chat = true;
+                                }
+                            }
+
+                            // Store/overwrite the pending offer details globally
+                            let offer_details = crate::tui::PendingOfferDetails {
+                                filename: filename.clone(), // Clone filename needed for both maps
+                                size_bytes,
+                            };
+                            app.pending_offers.insert(sender_id, offer_details.clone());
+
+                            // ALWAYS add the offer to the specific private chat history
+                            let history = app.private_chat_histories.entry(sender_id).or_default();
+                            let current_len = history.len(); // Get length *before* adding for scroll calculation
+                            history.push(crate::tui::PrivateChatItem::Offer(offer_details)); // Push the cloned details
+
+                            // Decide whether to notify in console or auto-scroll chat
+                            if !is_viewing_chat {
+                                // Show notification in console log
+                                app.push(format!(
+                                    "{} sent you a file offer: {} ({})",
+                                    sender_display_name,
+                                    filename, // Use the original filename from the event
+                                    crate::utils::format_bytes(size_bytes) // Use formatter
+                                ));
+                            } else {
+                                // If viewing the chat, auto-scroll if we were already near the bottom
+                                let current_max_scroll = current_len.saturating_sub(app.chat_viewport_height.max(1));
+                                if app.chat_scroll >= current_max_scroll {
+                                    let new_max_scroll = history.len().saturating_sub(app.chat_viewport_height.max(1));
+                                    app.chat_scroll = new_max_scroll;
+                                }
+                            }
+
+                            redraw = true;
+                        }
+                        AppEvent::SendFileOffer { .. } => {
+                            // This event is sent TO the swarm task, should not be received here.
+                            app.log("Warning: Received SendFileOffer event in UI loop.".to_string());
                         }
                     }
                 } else {

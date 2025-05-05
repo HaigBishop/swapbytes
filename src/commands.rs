@@ -266,9 +266,94 @@ pub fn process_command(command_input: &str, app: &mut App) -> Option<AppEvent> {
             app.push("  /hide             - Set your status to appear offline.".to_string());
             app.push("  /show             - Set your status to appear online.".to_string());
             app.push("  /who <name>       - Show information about a specific user.".to_string());
+            app.push("  /offer <path>     - Offer a file to the current private chat peer.".to_string());
             app.push("  /quit             - Exit SwapBytes.".to_string());
+            app.push("  /myoffers         - List pending incoming file offers.".to_string());
             // Add other commands here as needed
             app.push("  /help             - Show this help message.".to_string());
+        }
+
+        // Command: /offer <file_path>
+        // Offers a file to the peer in the current private chat context.
+        "offer" => {
+            if args.is_empty() {
+                app.push("Usage: /offer <file_path>".to_string());
+            } else {
+                // First, check if we are in a private chat context
+                if let ChatContext::Private { target_peer_id, target_nickname } = app.current_chat_context.clone() {
+                    // Clone the necessary parts from the context to avoid borrow issues
+                    let target_peer_id_cloned = target_peer_id;
+                    let target_nickname_cloned = target_nickname;
+
+                    // Verify the file exists and is readable
+                    match crate::utils::verify_offer_file(args) {
+                        Ok((verified_path, size_bytes)) => {
+                            let target_name = target_nickname_cloned.as_deref().unwrap_or("the peer"); // Use nickname or fallback
+                            app.push(format!("Sending offer to {}...", target_name));
+
+                            // Create details for local history and event
+                            let offer_details = crate::tui::PendingOfferDetails {
+                                filename: verified_path.file_name().map_or_else(
+                                    || args.to_string(), // Fallback to original arg if filename extraction fails
+                                    |name| name.to_string_lossy().into_owned()
+                                ),
+                                size_bytes,
+                            };
+
+                            // Add the sent offer to local history
+                            let history = app.private_chat_histories.entry(target_peer_id_cloned).or_default();
+                            let current_len = history.len();
+                            history.push(crate::tui::PrivateChatItem::OfferSent(offer_details.clone()));
+
+                            // Auto-scroll local chat if user is viewing it
+                            let current_max_scroll = current_len.saturating_sub(app.chat_viewport_height.max(1));
+                             if app.chat_scroll >= current_max_scroll {
+                                let new_max_scroll = history.len().saturating_sub(app.chat_viewport_height.max(1));
+                                app.chat_scroll = new_max_scroll;
+                            }
+
+                            // Create the event to send the offer via the swarm task
+                            event_to_send = Some(AppEvent::SendFileOffer { 
+                                target_peer: target_peer_id_cloned, 
+                                file_path: verified_path 
+                            });
+                        }
+                        Err(err_msg) => {
+                            // If invalid, show the error message.
+                            app.push(format!("Error offering file: {}", err_msg));
+                        }
+                    }
+                } else {
+                    app.push("Error: /offer can only be used in a private chat. Use /chat <nickname> first.".to_string());
+                }
+            }
+        }
+
+        // Command: /myoffers
+        // Lists all pending incoming file offers.
+        "myoffers" => {
+            if app.pending_offers.is_empty() {
+                app.push("You have no pending file offers.".to_string());
+            } else {
+                app.push("Pending file offers:".to_string());
+                // Collect offer details first to avoid borrow checker issues
+                let offer_summaries: Vec<(String, String, u64)> = app.pending_offers.iter().map(|(peer_id, offer)| {
+                    let sender_display_name = app.peers.get(peer_id)
+                        .and_then(|info| info.nickname.clone())
+                        .unwrap_or_else(|| {
+                            let id_str = peer_id.to_base58();
+                            let len = id_str.len();
+                            format!("user(...{})", &id_str[len.saturating_sub(6)..])
+                        });
+                    (sender_display_name, offer.filename.clone(), offer.size_bytes)
+                }).collect();
+
+                // Now print the collected summaries
+                for (sender_display_name, filename, size_bytes) in offer_summaries {
+                    let formatted_size = crate::utils::format_bytes(size_bytes);
+                    app.push(format!("  - From {}: {} ({})", sender_display_name, filename, formatted_size));
+                }
+            }
         }
 
         // Command: /who <nickname>

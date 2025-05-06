@@ -1,200 +1,92 @@
 # Setting Up a Libp2p Rendezvous Server for SwapBytes
 
-SwapBytes uses **mDNS** for automatic peer discovery on a local-area network. That only works when all instances live on the same LAN.  
-To let peers **find each other across the public Internet** we need a small, always-on **Rendezvous Server**.  
-This server is nothing more than a lightweight libp2p node that everyone knows upfront; clients "check-in" (REGISTER) and ask who else is around (DISCOVER).
+SwapBytes uses mDNS for peer discovery on a local network (LAN). To allow peers to discover each other across *different* networks (e.g., over the internet), a **Rendezvous Server** is needed. This server acts as a known meeting point where SwapBytes clients can register themselves and discover others.
 
-> **Good news →** The libp2p team already ships an off-the-shelf binary, so we do **not** have to write any server code. 🎉
+This guide explains how to set up a standalone Rendezvous server using the binary provided by the `libp2p-rendezvous` crate.
 
-## 1 · Quick TL;DR (copy-paste)
+## 1. Installation
 
-```bash
-# 1. Install Rust toolchain (if missing)
-curl https://sh.rustup.rs -sSf | sh        # <1 min, press ↵ for defaults
-
-# 2. Grab the rendezvous server binary (~15 s)
-cargo install libp2p-rendezvous --locked --bin libp2p-rendezvous-server
-
-# 3. Run it (default port 62649).  Leave this running!
-libp2p-rendezvous-server
-
-# 4. Copy the PeerId + Multiaddr the server prints, then
-#    paste them into  src/constants.rs  inside your SwapBytes repo:
-#    - RENDEZVOUS_PEER_ID
-#    - RENDEZVOUS_POINT_ADDRESS
-
-# 5. Re-compile & run SwapBytes. Peers will now discover each
-#    other no matter where they are located.
-```
-
-That's it. The remainder of this doc explains each step in more detail and offers troubleshooting tips.
-
----
-
-## 2 · Prerequisites
-
-| Requirement | Version | Notes |
-|-------------|---------|-------|
-| Rust toolchain | 1.74 or newer | `rustup` installs the correct stable toolchain automatically |
-| Open TCP port | 62649 (default) | Can be changed; ensure it is **exposed** in firewalls/containers |
-
-A cheap VPS (DigitalOcean, Hetzner CPX, AWS Lightsail, etc.) with a public IPv4 address works great.
-
----
-
-## 3 · Installing the Server Binary
-
-libp2p publishes a crate containing several binaries. We only need `libp2p-rendezvous-server`.
+You need Rust and Cargo installed. Install the server binary using Cargo:
 
 ```bash
-cargo install libp2p-rendezvous --locked --bin libp2p-rendezvous-server
+cargo install libp2p-rendezvous --bin libp2p-rendezvous-server
 ```
 
-* `--locked` ensures Cargo replicates the exact dependency versions tested by the authors.
-* The compiler caches artefacts, so subsequent installs/upgrades are almost instant.
+This command downloads the source code for the `libp2p-rendezvous` crate, compiles the `libp2p-rendezvous-server` binary, and installs it into your Cargo binary path (usually `~/.cargo/bin/`). You might need to add `~/.cargo/bin` to your system's `PATH` if it's not already there.
 
-The executable ends up in `~/.cargo/bin/` – make sure that directory is on your `$PATH` (rust-installer does this automatically).
+## 2. Running the Server
 
----
-
-## 4 · Running the Server
-
-### 4.1 · Plain Terminal (Quick Try-Out)
+Once installed, you can run the server simply by executing its name:
 
 ```bash
 libp2p-rendezvous-server
 ```
 
-You will see log output similar to:
-
-```text
-INFO  rendezvous_server > Local PeerId  = 12D3KooWLV12WefKsw14gZp6upUnHDj6S54LShtrKzN2fFfQQCT1
-INFO  rendezvous_server > Listening on  /ip4/0.0.0.0/tcp/62649
-```
-
-Copy **both** the `PeerId` and the full **Multiaddr** – we need them in the next step.
-
-The process keeps running in the foreground.  
-If you want to keep it alive after you log out, either:
-
-* prepend `nohup … & disown`,
-* or use `tmux`/`screen`,
-* or move on to "4.2 Systemd Service" below.
-
-### 4.2 · (Option A) Systemd Service
-
-Create `/etc/systemd/system/rendezvous.service`:
-
-```ini
-[Unit]
-Description=Libp2p Rendezvous Server
-After=network.target
-
-[Service]
-Type=simple
-ExecStart=/home/<user>/.cargo/bin/libp2p-rendezvous-server
-Restart=on-failure
-User=<user>
-
-[Install]
-WantedBy=multi-user.target
-```
+By default, it will listen on `/ip4/0.0.0.0/tcp/62648`. You can specify a different listen address using the `--listen` flag:
 
 ```bash
-sudo systemctl daemon-reload
-sudo systemctl enable --now rendezvous.service
-journalctl -fu rendezvous.service  # live logs
+# Example: Listen on all interfaces, TCP port 50000
+libp2p-rendezvous-server --listen /ip4/0.0.0.0/tcp/50000
 ```
 
-Adjust paths/usernames as needed.
+## 3. Important Output (PeerId and Address)
 
-### 4.3 · (Option B) Docker
+When the server starts, it will print output similar to this:
 
-If you prefer containers:
-
-```Dockerfile
-# Dockerfile (simple, ~23 MB image)
-FROM rust:1.74-slim as builder
-RUN cargo install libp2p-rendezvous --locked --bin libp2p-rendezvous-server
-
-FROM debian:stable-slim
-COPY --from=builder /usr/local/cargo/bin/libp2p-rendezvous-server /usr/local/bin/
-EXPOSE 62649/tcp
-ENTRYPOINT ["libp2p-rendezvous-server"]
+```
+INFO libp2p_rendezvous_server::server > Local Peer Id: 12D3KooWAbCdEfGhIjKlMnOpQrStUvWxYz1234567890
+INFO libp2p_rendezvous_server::server > Listening on "/ip4/127.0.0.1/tcp/62648"
+INFO libp2p_rendezvous_server::server > Listening on "/ip4/192.168.1.100/tcp/62648" # Example local IP
+INFO libp2p_rendezvous_server::server > Listening on "/ip6/::1/tcp/62648"
+# ... potentially more addresses ...
 ```
 
-```bash
-docker build -t rendezvous-server .
-docker run -d -p 62649:62649 --name rendezvous rendezvous-server
-```
+**You MUST note down two crucial pieces of information:**
 
----
+1.  **The Server's PeerId:** In the example above, it's `12D3KooWAbCdEfGhIjKlMnOpQrStUvWxYz1234567890`. This uniquely identifies the server node on the libp2p network.
+2.  **A Publicly Reachable Multiaddress:** This is the address other SwapBytes clients will use to connect to the server. If you're running the server on a machine behind a NAT/firewall (like a home router), you'll need to use its public IP address and ensure the chosen port is forwarded. For local testing, `/ip4/127.0.0.1/tcp/62648` (or your `--listen` port) is usually sufficient. A typical public address might look like `/ip4/YOUR_PUBLIC_IP/tcp/62648`.
 
-## 5 · Tell SwapBytes About Your Server
+## 4. Configuring SwapBytes Clients
 
-Open `src/constants.rs` inside the SwapBytes codebase and replace the placeholders:
+SwapBytes clients need to know the `PeerId` and `Multiaddr` of the Rendezvous server to connect to it.
+
+Currently, these are hardcoded as *default* values in `src/constants.rs`:
 
 ```rust
-/// Peer ID of the default Rendezvous server.
-pub const RENDEZVOUS_PEER_ID: &str = "12D3KooWLV12WefKsw14gZp6upUnHDj6S54LShtrKzN2fFfQQCT1";
-/// Multiaddress of the default Rendezvous server.
-pub const RENDEZVOUS_POINT_ADDRESS: &str = "/ip4/203.0.113.10/tcp/62649";
+// src/constants.rs
+pub const RENDEZVOUS_PEER_ID: &str = "12D3KooWExampleRendezvousPeerIDString12345"; // REPLACE ME
+pub const RENDEZVOUS_POINT_ADDRESS: &str = "/ip4/127.0.0.1/tcp/62648"; // REPLACE ME
 ```
 
-**Important:**
+**You MUST replace these placeholder values** in `src/constants.rs` with the **actual `PeerId` and publicly reachable `Multiaddr`** you obtained from running *your* `libp2p-rendezvous-server` in Step 3 before compiling and running SwapBytes.
 
-1. The *PeerId* **must** match **exactly** the one printed by the server.
-2. The Multiaddr **must** include the public IP/hostname reachable by clients.
-3. Keep the TCP port in sync with whatever you exposed (62649 by default).
+*(Future versions of SwapBytes might allow specifying the rendezvous point via command-line arguments or a configuration file).*
 
-Re-compile & run SwapBytes. On startup every client will:
+## 5. Persistence (Running Long-Term)
 
-1. Dial the rendezvous address.
-2. REGISTER under the namespace `swapbytes-poc-v1` (hard-coded for now).
-3. DISCOVER other peers and automatically dial them.
+For the Rendezvous server to be useful, it needs to run continuously on a machine that is accessible from the internet (e.g., a Virtual Private Server - VPS). You would typically run it as a background service using tools like:
 
-You can watch the swarm's log lines confirming registration and discovery.
+*   `systemd` (Linux)
+*   `launchd` (macOS)
+*   Docker
+*   `screen` or `tmux` (simpler, but less robust)
 
----
+Make sure any firewalls (on the server machine or cloud provider) allow incoming connections on the TCP port the server is listening on.
 
-## 6 · Security & Production Notes
+## 6. Alternative: Running the Example Server
 
-* The reference server **does not authenticate** clients. Anyone with the address can register.  For hobby projects this is fine; for production consider wrapping it behind authentication or a token mechanism.
-* The server keeps all state **in memory**. If it restarts, registrations vanish until clients re-register (SwapBytes does this periodically).
-* If you expose the server on the open Internet, rate-limit incoming connections to avoid abuse.
-* **TLS/Noise encryption** happens automatically at the libp2p layer – your traffic is already encrypted.
-
----
-
-## 7 · Troubleshooting
-
-| Symptom | Possible Cause & Fix |
-|---------|----------------------|
-| *Clients cannot connect* | Port 62649 blocked by firewall / router. Open or forward it. |
-| *`RegisterFailed` errors* | The constants in SwapBytes don't match the server's PeerId/addr. Double-check. |
-| *High latency pings* | VPS far away geographically – choose a region closer to your users. |
-| *`AddressInUse` when starting server* | Another process is already listening on 62649. Pick a different port with `--port <n>`. |
-
----
-
-## 8 · Alternative: Build From the Example Source
-
-This repo ships a fully-featured example rendezvous implementation under `rendezvous_examples/rendezvous/`.
-Use it if you want to hack on the server logic yourself:
+The `rendezvous_examples/rendezvous/` directory contains example code, including a server (`main.rs`). You *can* run this for local testing:
 
 ```bash
+# Navigate to the example directory
 cd rendezvous_examples/rendezvous
+
+# Run the example server (listens on port 62649 by default)
 RUST_LOG=info cargo run --bin rendezvous-example
 ```
 
-The output is identical to the pre-built binary; configure SwapBytes the same way.
+**However:**
 
----
-
-## 9 · Next Steps
-
-* Expose multiple rendezvous servers and **load-balance** clients across them.
-* Implement **persistent storage** (e.g. SQLite) in the server to survive restarts.
-* Add **token-based registration** to limit who can use your rendezvous.
-
-Happy hacking — and may your bytes always rendezvous! 🚀
+*   This example server uses a **fixed PeerId** (`12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN`) derived from a hardcoded key in `main.rs`.
+*   It listens on port `62649` by default.
+*   Using the standalone `libp2p-rendezvous-server` (Steps 1-4) is the **recommended approach** as it generates a unique keypair/PeerId each time (unless you provide one) and is easier to manage.

@@ -1,3 +1,5 @@
+**This is the directory from https://github.com/libp2p/rust-libp2p/tree/master/examples/rendezvous taken and with a modified Cargo.toml**
+
 ## Description
 
 The rendezvous protocol example showcases how to implement a rendezvous server and interact with it using different binaries.

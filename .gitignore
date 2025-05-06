@@ -28,3 +28,6 @@ Cargo.lock
 # Ignore .rs and .txt file in root dir
 /*.rs
 /*.txt
+
+rendezvous/target/
+rendezvous/Cargo.lock

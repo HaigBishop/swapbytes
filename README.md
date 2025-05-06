@@ -82,6 +82,7 @@ Using SwapBytes involves running commands such as `/setname <name>` in the conso
 | **File Swapping** | `/offer <file>` → `/accept | /decline` → direct transfer. |
 | **Ergonomic TUI** | Cross-platform Text User Interface powered by `ratatui`. |
 | **Auto mDNS** | Automatic mDNS connection to peers. |
+| **Rendezvous** | Can connect to peers on different networks via a Rendezvous server. See `how-to-rendezvous.md` for a guide. |
 | **Command Interface** | Simple slash-commands entered in the Console pane. |
 | **Heartbeat Mechanism** | Regular lightweight background messages announce presence (~2s); peers offline after ~8s inactivity. |
 
@@ -100,13 +101,19 @@ Using SwapBytes involves running commands such as `/setname <name>` in the conso
 
 ---
 
-## Peer Discovery Challenges
+## Peer Discovery
 
-The app can automatically find other users on a local network using mDNS. This also usually works with multiple instances on the same machine. However sometimes, especially on MacOS, this auto-discovery might not work when running instances on the *same* machine without being connected to a larger network. If the apps don't see each other automatically, it's easy to connect them manually: just use the `/me` command in one instance to get its multiaddr, and then use `/ping <multiaddr>` in the other instance to connect. 
+#### Peers on the same network
 
-You might also see a situation on certain restricted networks, like some university or corporate LANs, where peers *do* discover each other initially using their local network addresses. Despite this initial discovery, the network might block the specific communication protocols libp2p needs to establish a full, secure connection. This can lead to peers appearing online briefly in the user list but then quickly showing as offline because the connection handshake failed, preventing ongoing communication like heartbeats or chat messages from getting through.
+The app can automatically find other users on a local network using mDNS and if a rendezvous server is active, through that mechanism as well. 
 
-**Bottom line:** If instances do not connect or maintain a connection, try using `/ping <multiaddr>`  to initiate a stable connection.
+However sometimes, this auto-discovery might not work when running instances on the *same* machine without being connected to a larger network. You might also see a situation on certain restricted networks, like some university LANs, where peers *do* discover each other initially but then quickly showing as offline.
+
+If peers on the same network don't maintian a connection automatically, it's easy to connect them manually: just use the `/me` command in one instance to get its multiaddr, and then use `/ping <multiaddr>` in the other instance to connect. 
+
+#### Peers on different networks
+
+To connect to peers on another network, a rendezvous server is required. The file `how-to-rendezvous.md` provides a full guide on setting up a server. After a server is properly hosted, the address just needs to be entered into the constant `RENDEZVOUS_ADDR` in the client's `constants.rs` file to connect.
 
 ---
 

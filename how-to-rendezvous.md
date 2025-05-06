@@ -8,13 +8,15 @@ This guide explains how to set up a standalone Rendezvous server using the pre-b
 
 **Rust & Cargo**
 
+You need Rust!
+
 **Modified Example**
 
 The `Cargo.toml` file within the `rendezvous` directory has been modified from its original state to remove workspace dependencies and make it runnable as a standalone project. 
 
 ## Running the Rendezvous Server
 
-The simplest way to get a Rendezvous server running for SwapBytes is to use the example server included in the project's ` directory.
+The simplest way to get a Rendezvous server running for SwapBytes is to use the example server included in the project's `rendezvous` directory.
 
 1.  **Navigate to the Rendezvous Example Directory:**
     Open your terminal and change to the specific directory containing the rendezvous examples within the SwapBytes project structure:

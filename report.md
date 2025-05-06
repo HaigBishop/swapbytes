@@ -29,17 +29,7 @@ For more practical information on how SwapBytes works, see README.md and demo.md
 
 Developing a P2P application presents unique challenges, particularly around peer discovery and connectivity.
 
-*   **Challenge:** Reliable peer discovery across diverse network conditions. While mDNS works well on many LANs, it can be unreliable, especially when running multiple instances on the same machine (common during development) or on restricted networks (e.g., university Wi-Fi). Discovery *outside* the local network was a requirement but presents significant hurdles (NAT traversal, firewall configurations).
-*   **Solution:**
-    *   **mDNS:** Implemented as the primary *local* discovery mechanism, fulfilling a basic requirement.
-    *   **Manual Connection (`/ping <multiaddr>`):** Acknowledging mDNS limitations and the difficulty of robust external discovery without rendezvous servers or complex NAT traversal (which were not required), a manual connection method was added. Users can use `/me` to get their listen address (`multiaddr`) and share it out-of-band, allowing another user to connect directly using `/ping`. This provides a reliable fallback, especially for testing or scenarios where mDNS fails. The `README.md` clearly documents this workaround and the potential network limitations.
-    *   **No Rendezvous/NAT Traversal:** Explicitly decided *not* to implement a public rendezvous server or NAT hole-punching, focusing on robust LAN operation and the manual fallback as per the assignment's *basic* requirements, while still allowing for potential external connections if network topology permits (e.g., public IP addresses or configured port forwarding).
-
-*   **Challenge:** Maintaining an accurate view of online peers in a dynamic P2P network. Peers can join, leave, or become unresponsive without explicit notification.
-*   **Solution:** Implemented a **heartbeat mechanism**. Each peer periodically broadcasts a small presence message. Peers track the last seen time for others; if a peer hasn't been heard from beyond a defined timeout (`constants::PEER_TIMEOUT`), their status is marked as `Offline` in the UI. This provides a reasonably accurate and timely user list. The `/forget` command allows manually clearing the peer list if needed.
-
-*   **Challenge:** Providing a usable interface for complex P2P interactions within a terminal.
-*   **Solution:** Implemented an advanced TUI using `ratatui`. This significantly improves usability over a plain CLI by providing distinct, concurrently updated panes for users, chat, and console input/output, along with features like scrolling and cursor control. This fulfills one of the *bonus* feature criteria.
+...
 
 ## 4. Requirements & Bonus Features
 
@@ -49,7 +39,7 @@ Developing a P2P application presents unique challenges, particularly around pee
     *   There is a global chat where all users can see all messages.
     *   Direct message chats can be opened to send/receive private messages.
     *   File sending via request/response (`/offer`, `/accept`, `/decline` ).
-    *   Peer discovery: mDNS for discovery is implemented. The manual `/ping <multiaddr>` command provides a mechanism that *can* work for cases in which mDNS fails (more info in README.md).
+    *   Peer discovery: mDNS is implemented for peer discovery, and also rendezvous servers can be set up without too much difficulty. Additionally, the manual `/ping <multiaddr>` command provides a mechanism that *can* work for cases in which mDNS fails (more info in README.md).
     *   Full documentation is found in `README.md`.
 *   **Bonus Features:**
     *   **Advanced UI using ratatui:** This bonus feature has been implemented, providing a nice user experience with 3 panes, scrolling, multiple user input options and a graceful exit.
@@ -70,7 +60,8 @@ Developing a P2P application presents unique challenges, particularly around pee
 
 *   The project  implements all the specified basic requirements for the SwapBytes application. It features a functional P2P system for chat and file offering built on `libp2p` and Rust. Crucially, it goes beyond the basic requirements by implementing an **advanced `ratatui` TUI** and a few extra features listed above. 
 *   The codebase is well-structured into modules, and the `README.md` provides good documentation, instructions, demonstration, and discussion of potential issues and workarounds. 
-*   The implementation includes thoughtful additions like nickname handling, visibility controls, and a heartbeat mechanism for presence, demonstrating a solid understanding of P2P concepts and robust application development. While advanced discovery mechanisms like Kademlia DHT or rendezvous servers were not implemented, the chosen approach (mDNS + manual ping) directly addresses the assignment's core requirements and acknowledges practical limitations. 
+*   ...
+
 *   The overall quality, completeness of basic features, inclusion of a bonus features, and thorough documentation justify an A grade.
 
 ---

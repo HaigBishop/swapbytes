@@ -129,4 +129,3 @@ You might also see a situation on certain restricted networks, like some univers
 SwapBytes is released under the **MIT License**. See the LICENSE file.
 
 ---
-

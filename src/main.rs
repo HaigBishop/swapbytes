@@ -1,5 +1,19 @@
 /*
 Main entry point for the SwapBytes application.
+
+Project Structure:
+
+ * main.rs - Entry point, initializes the application state and starts the main event loop.
+ * tui.rs - Manages the Terminal User Interface display and layout.
+ * swarm_task.rs - Runs the main libp2p swarm event loop in a separate task.
+ * behavior.rs - Defines the combined libp2p network behaviors (Gossipsub, etc.).
+ * event_handler.rs - Handles events from the swarm, UI, and other sources.
+ * input_handler.rs - Parses and processes user input from the TUI.
+ * commands.rs - Implements logic for user-executable commands.
+ * protocol.rs - Defines data structures for network communication or internal state.
+ * constants.rs - Contains application-wide constant values.
+ * utils.rs - Provides miscellaneous helper functions and utilities.
+
 */
 
 // --- Standard Library Imports ---

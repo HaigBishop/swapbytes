@@ -19,7 +19,7 @@ SwapBytes is a **CLI/TUI application** that lets users **barter files directly w
 
 ## Building & Running
 
-> Requires **Rust**.
+To install and run SwapBytes  simplying clone the GitHub repository and run `cargo run`. Rust is required.
 
 ```bash
 # Clone
@@ -30,7 +30,45 @@ cd swapbytes
 cargo run
 ```
 
+---
 
+## Basic Usage
+
+Once in the SwapBytes TUI, you can use keyboard controls:
+
+-  `Tab` to toggle pane focus
+- `↑`/`↓` to scroll
+- `Ctrl + Q` or the `/quit` command to quit 
+- `/` to start typing a command (see below)
+
+Using SwapBytes involves running commands such as `/setname <name>` in the console and sending chat messages in the chat. 
+
+---
+
+## Demo
+
+**See the [demo.md](demo.md) for a visual walk-through.**
+
+---
+
+## Commands
+
+| Command             | Scope        | Description                                                  |
+| ------------------- | ------------ | ------------------------------------------------------------ |
+| `/help` or `/h`     | global       | Print help text.                                             |
+| `/setdir <path>`    | global       | Change download directory (validated absolute path).         |
+| `/setname <name>`   | global       | Change nickname.                                             |
+| `/me`               | global       | Show information about you (addrs, nickname, etc.)           |
+| `/chat <name>`      | global       | Switch chat to a user (e.g. `/chat bob`) or global (`/chat global`) |
+| `/offer <path>`     | private chat | Propose a file swap in the current private chat .            |
+| `/accept`           | private chat | Accept the latest offer in the current private chat .        |
+| `/decline`          | private chat | Decline the latest offer in the current private chat .       |
+| `/hide` / `/show`   | global       | Toggle your visibility in the Global User List.              |
+| `/forget`           | global       | Clear the list of known peers (they will reconnect on next heartbeat). |
+| `/ping <multiaddr>` | global       | Ping a peer by `multiaddr` (obtainable using `/me`).         |
+| `/who <name>`       | global       | Show information about a specific user by nickname.          |
+| `/myoffers`         | global       | List pending incoming file offers.                           |
+| `/quit` or `/q`     | global       | Quit the application.                                        |
 
 ---
 
@@ -55,99 +93,10 @@ cargo run
 | **Directory Safety** | User-chosen **output directory** validated at startup and via `/setdir`. |
 | **Duplicate Nicknames** | Allowed, but each peer gets a warning if a clash is detected. |
 | **Help Command** | `/help` prints concise command help. |
-| **Direct Peer Interaction** | `/ping` command provides a secondary method to connect to peers. |
+| **Direct Peer Connection** | `/ping` command provides a secondary method to connect to peers. |
 | **Nickname Handling** | Default random name (`userXXXX`); allows user-set names; handles duplicates gracefully. |
 | **Self-Information** | `/me` command displays current addresses, PeerID, download directory, nickname, and visibility. |
 | **Graceful Exit** | Cleanly shut down the application using `Ctrl+Q` or `/q`. |
-
-
----
-
-### User Interface Layout  
-
-**Global chat view:**
-
-```
-┌───────────────────────────────────────────────┬──────────────┐
-│               Global Chat                     │ Users        │
-│  [you] hello bob                              │ alice (Fp9x) │
-│  [bob] hey wanna trade?                       │ bob (s8sF)   │
-│  …                                            │              │
-│                                               │              │
-│                                               │              │
-├───────────────────────────────────────────────┤              │
-│               Console                         │              │
-│  > /chat bob                                  │              │
-└───────────────────────────────────────────────┴──────────────┘
-```
-**Private chat view:**
-
-```
-┌───────────────────────────────────────────────┬──────────────┐
-│              Private Chat (bob)               │ Users        │
-│  [you] hi, yeah let's trade!                  │ alice (Fp9x) │
-│  [bob] /offer notes.pdf                       │ *bob* (s8sF) │
-│  >> Accept notes.pdf? (/accept or /decline)   │              │
-│                                               │              │
-│                                               │              │
-├───────────────────────────────────────────────┤              │
-│               Console                         │              │
-│  > /accept                                    │              │
-└───────────────────────────────────────────────┴──────────────┘
-```
-
-#### TUI Panes
-- **Users List** 
-    - Always visible, shows nickname + PeerIDs and online/offline status.  
-    - Asterisk marks the peer whose chat is currently in view.
-- **Chat Pane**
-    - Shows either: Global Chat or Private Chat
-    - To enter Global Chat run `/global` or hit `ESC`
-    - To enter Private Chat run `/chat <nickname>` or select a user in the Users List
-- **Console Pane**
-    - Always visible, shows console output and online/offline status. 
-
-#### Trade offers
-- In a private chat, `/offer <file>` posts an interactive prompt (`Accept?`) inside the same pane.  
-- `/accept` begins the transfer; `/decline` cancels it.
-
-
-
----
-
-## Command Reference
-
-| Command | Scope | Description |
-|---------|-------|-------------|
-| `/help` | global | Print brief help. |
-| `/setdir <path>` | global | Change download directory (validated absolute path). |
-| `/setname <name>` | global | Change nickname (validated). |
-| `/me`           | global       | Show information about you (addrs, nickname, etc.) |
-| `/chat <name>` | global | Switch chat to a user (e.g. `chat bob`) or global (`chat global`) |
-| `/offer <path>` | private chat | Propose a file swap in the current private chat . |
-| `/accept` | private chat | Accept the latest offer in the current private chat . |
-| `/decline` | private chat | Decline the latest offer in the current private chat . |
-| `/hide` / `/show` | global | Toggle your visibility in the Global User List. |
-| `/forget` | global | Clear the list of known peers (they will reappear on next heartbeat). |
-| `/ping <multiaddr>` | global | Ping a peer by `multiaddr`. |
-| `/who <name>`       | global       | Show information about a specific user by nickname. |
-| `/quit`           | global       | Quit the application    |
-| `/myoffers`       | global       | List pending incoming file offers. |
-
----
-
-## Application Usage Flow
-
-1.  **Start-up:** The application generates a unique cryptographic identity (PeerId) and a default random nickname (e.g. `user1234`). It begins listening for incoming connections on available network interfaces. Default visibility is set to **ON**.
-2.  **Peer Discovery (mDNS):** The app uses the **mDNS** protocol to broadcast its presence and discover other SwapBytes users on the **local network (LAN)**. When another peer is discovered, it's added to the Users List, initially marked as online.
-3.  **Presence & Connection Maintenance (Gossipsub Heartbeats):** To maintain the online status and handle peers joining/leaving, the app uses **Gossipsub**:
-    *   If **visible** (`/show`, default), a lightweight **Heartbeat** message containing the current nickname is broadcast via Gossipsub every **2 seconds** (`HEARTBEAT_INTERVAL_SECS`).
-    *   Receiving any Gossipsub message (heartbeats or global chat) from a peer updates their `last_seen` time in the local state and well as that user's nickname.
-    *   A background task checks periodically (every 5s). If no message has been received from a peer for more than **8 seconds** (`PEER_TIMEOUT_SECS`), that peer is marked **offline** in the Users List.
-    *   Using `/hide` stops sending heartbeats, causing the user to appear offline to others after the timeout, while `/show` resumes heartbeats.
-4.  **Manual Connection (Ping):** If mDNS fails (e.g., firewall, different network, specific OS issues) or for direct testing, users can establish a connection manually using `/ping <multiaddr>`. The required multiaddress can be found using `/me` on the target peer. This uses the `ping::Behaviour` to check reachability and implicitly establishes a persistent connection if successful. For testing two instances on the **same machine**, using the `/ip4/127.0.0.1/...` address is the most reliable way.
-5.  **Global Chat (Gossipsub):** Messages typed into the chat pane while in the `Global Chat` context are packaged and published to the shared `"swapbytes-global-chat"` using **Gossipsub**. All connected peers receive these messages and display them.
-6.  **Private Chat & Trade (Request/Response):** Interacting with specific users privately (via `/chat <name>`) and managing file trades (`/offer`, `/accept`, `/decline`) uses libp2p's direct **Request/Response** protocol.
 
 ---
 
@@ -159,6 +108,19 @@ You might also see a situation on certain restricted networks, like some univers
 
 **Bottom line:** If instances do not connect or maintain a connection, try using `/ping <multiaddr>`  to initiate a stable connection.
 
+---
+
+## Project Structure
+ * **main.rs** - Entry point, initializes the application state and starts the main event loop.
+ * **tui.rs** - Manages the Terminal User Interface display and layout.
+ * **swarm_task.rs** - Runs the main libp2p swarm event loop in a separate task.
+ * **behavior.rs** - Defines the combined libp2p network behaviors (Gossipsub, etc.).
+ * **event_handler.rs** - Handles events from the swarm, UI, and other sources.
+ * **input_handler.rs** - Parses and processes user input from the TUI.
+ * **commands.rs** - Implements logic for user-executable commands.
+ * **protocol.rs** - Defines data structures for network communication or internal state.
+ * **constants.rs** - Contains application-wide constant values.
+ * **utils.rs** - Provides miscellaneous helper functions and utilities.
 
 ---
 
@@ -166,7 +128,5 @@ You might also see a situation on certain restricted networks, like some univers
 
 SwapBytes is released under the **MIT License**. See the LICENSE file.
 
-
-## Useful Links
-**Ratatui:** https://ratatui.rs/
+---
 

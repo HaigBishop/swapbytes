@@ -2,20 +2,6 @@
 
 **A peer-to-peer file-bartering CLI built in Rust with [`libp2p`](https://libp2p.io) and an TUI powered by [`ratatui`](https://github.com/ratatui-org/ratatui).**
 
----
-
-## Table of Contents
-1. [What is SwapBytes?](#what-is-swapbytes)
-2. [Key Features](#key-features)
-3. [User Interface Layout](#user-interface-layout)
-4. [Command Reference](#command-reference)
-5. [Startup & Peer Discovery Flow](#startup--peer-discovery-flow)
-6. [Error Handling & Edge Cases](#error-handling--edge-cases)
-7. [Building & Running](#building--running)
-8. [Examples](#examples)
-9. [Road-map](#road-map)
-10. [Contributing](#contributing)
-11. [License](#license)
 
 ---
 
@@ -27,6 +13,24 @@ SwapBytes is a **CLI/TUI application** that lets users **barter files directly w
 - Networked with **libp2p** (pub-sub + request/response).
 - Cross-platform (Linux, macOS, Windows).
 - No central server required – discovery via **mDNS** on-LAN.
+
+
+---
+
+## Building & Running
+
+> Requires **Rust**.
+
+```bash
+# Clone
+git clone https://github.com/HaigBishop/swapbytes.git
+cd swapbytes
+
+# Run
+cargo run
+```
+
+
 
 ---
 
@@ -155,20 +159,6 @@ You might also see a situation on certain restricted networks, like some univers
 
 **Bottom line:** If instances do not connect or maintain a connection, try using `/ping <multiaddr>`  to initiate a stable connection.
 
----
-
-## Building & Running
-
-> Requires **Rust ≥ 1.77** and **Git**.
-
-```bash
-# Clone
-git clone https://github.com/HaigBishop/swapbytes.git
-cd swapbytes
-
-# Run
-cargo run
-```
 
 ---
 

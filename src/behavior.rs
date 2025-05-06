@@ -2,7 +2,7 @@
 Sets up all the different protocols and behaviours for our P2P node.
 */
 
-use libp2p::{ping, swarm::NetworkBehaviour, gossipsub, mdns, identity::Keypair, request_response};
+use libp2p::{ping, swarm::NetworkBehaviour, gossipsub, mdns, identity::Keypair, request_response, rendezvous};
 use std::{collections::hash_map::DefaultHasher, hash::{Hash, Hasher}, time::Duration, iter};
 use tokio::io; // Needed for mapping errors
 use crate::protocol::{PrivateCodec, PrivateRequest, PrivateResponse, PrivateProtocol};
@@ -23,6 +23,8 @@ pub struct SwapBytesBehaviour {
     pub ping: ping::Behaviour,
     /// Facilitates direct request-response interactions between peers using a custom protocol.
     pub request_response: request_response::Behaviour<PrivateCodec>,
+    /// Handles registration and discovery with a Rendezvous point.
+    pub rendezvous: rendezvous::client::Behaviour,
 }
 
 // --- Behaviour Event Enum ---
@@ -36,6 +38,7 @@ pub enum SwapBytesBehaviourEvent {
     Mdns(mdns::Event),
     Ping(ping::Event),
     RequestResponse(request_response::Event<PrivateRequest, PrivateResponse>),
+    Rendezvous(rendezvous::client::Event),
 }
 
 // --- Event Conversion Implementations (`From` traits) ---
@@ -68,6 +71,12 @@ impl From<request_response::Event<PrivateRequest, PrivateResponse>> for SwapByte
     }
 }
 
+impl From<rendezvous::client::Event> for SwapBytesBehaviourEvent {
+    fn from(event: rendezvous::client::Event) -> Self {
+        SwapBytesBehaviourEvent::Rendezvous(event)
+    }
+}
+
 // --- Behaviour Implementation ---
 
 impl SwapBytesBehaviour {
@@ -77,6 +86,7 @@ impl SwapBytesBehaviour {
     /// # Argument: `keypair` - The node's identity keypair, used for signing messages and identification.
     /// 
     pub fn new(keypair: &Keypair) -> Result<Self, io::Error> {
+        let local_peer_id = keypair.public().to_peer_id(); // Get PeerId early
 
         // --- Gossipsub Setup ---
         // Define a function to generate unique IDs for gossipsub messages based on their content hash.
@@ -106,7 +116,7 @@ impl SwapBytesBehaviour {
         // Create the mDNS behaviour for discovering peers on the local network.
         let mdns = mdns::tokio::Behaviour::new(
             mdns::Config::default(), // Use default mDNS configuration.
-            keypair.public().to_peer_id() // Identify the node using its PeerId derived from the public key.
+            local_peer_id, // Use the local PeerId
         )?;
 
         // --- Ping Setup ---
@@ -128,6 +138,9 @@ impl SwapBytesBehaviour {
             request_response::Config::default(), // Use default request-response configuration.
         );
 
+        // --- Rendezvous Client Setup ---
+        let rendezvous = rendezvous::client::Behaviour::new(keypair.clone());
+
         // --- Combine Behaviours ---
         // Construct the `SwapBytesBehaviour` struct with all initialized behaviours.
         Ok(Self {
@@ -135,6 +148,7 @@ impl SwapBytesBehaviour {
             mdns,
             ping,
             request_response,
+            rendezvous,
         })
     }
 }

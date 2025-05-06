@@ -6,8 +6,11 @@ This guide explains how to set up a standalone Rendezvous server using the pre-b
 
 ## Prerequisites
 
-*   **Rust & Cargo:** You need Rust installed to build and run the server. If you don't have it, visit [rustup.rs](https://rustup.rs/).
-*   **Modified Example:** The `Cargo.toml` file within the `rendezvous` directory has been modified from its original state to remove workspace dependencies and make it runnable as a standalone project. This change is necessary because the example is not part of the main `swapbytes` Cargo workspace.
+**Rust & Cargo**
+
+**Modified Example**
+
+The `Cargo.toml` file within the `rendezvous` directory has been modified from its original state to remove workspace dependencies and make it runnable as a standalone project. 
 
 ## Running the Rendezvous Server
 
@@ -16,10 +19,9 @@ The simplest way to get a Rendezvous server running for SwapBytes is to use the 
 1.  **Navigate to the Rendezvous Example Directory:**
     Open your terminal and change to the specific directory containing the rendezvous examples within the SwapBytes project structure:
     ```bash
-    cd /path/to/swapbytes/rendezvous
+    cd swapbytes/rendezvous
     ```
-    *(Replace `/path/to/swapbytes` with the actual path where you cloned the repository)*
-
+    
 2.  **Build and Run the Server:**
     From *within* the `rendezvous` directory, use Cargo to build and run the example server binary. We use `RUST_LOG=info` to see basic activity logs.
     ```bash
@@ -37,7 +39,7 @@ The simplest way to get a Rendezvous server running for SwapBytes is to use the 
 
 *   **Public IP Address/Domain:** For SwapBytes clients on *different* networks to reach your server, the machine running the server must have a stable public IP address or a domain name pointing to it.
 *   **Firewall:** Ensure that your server's firewall allows incoming TCP connections on port `62649`.
-*   **Server Address in SwapBytes:** When you modify the SwapBytes client code (as per the next steps), you will need to configure it with the *public* address and the PeerID (`12D3KooW...`) of *this* running server. If you run the server on `1.2.3.4`, the address clients need might be `/ip4/1.2.3.4/tcp/62649`.
+*   **Server Address in SwapBytes:** For the SwapBytes client code, it must be configured with the *public* address and the PeerID of the running server. This is in `constants.rs`.
 
 ## Stopping the Server
 

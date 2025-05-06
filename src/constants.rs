@@ -22,7 +22,11 @@ pub const PINGING_DURATION: Duration = Duration::from_millis(2000);
 pub const MAX_LOG_LINES: usize = 1000;
 
 // --- Rendezvous Configuration ---
-/// Peer ID of the default Rendezvous server.
-pub const RENDEZVOUS_PEER_ID: &str = "12D3KooWExampleRendezvousPeerIDString12345";
-/// Multiaddress of the default Rendezvous server.
-pub const RENDEZVOUS_POINT_ADDRESS: &str = "/ip4/127.0.0.1/tcp/62648";
+/// Rendezvous namespace we register in.
+pub const RENDEZVOUS_NS: &str = "swapbytes";
+/// Peer ID of the Rendezvous server.
+pub const RENDEZVOUS_PEER_ID: &str = "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN";
+/// Multiaddress of the Rendezvous server.
+pub const RENDEZVOUS_ADDR: &str = "/ip4/192.168.1.216/tcp/62649";
+// LOCAL: 127.0.0.1
+// LAPTOP ON HOME NETWORK: 192.168.1.216

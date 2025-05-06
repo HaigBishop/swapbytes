@@ -21,3 +21,8 @@ pub const PINGING_DURATION: Duration = Duration::from_millis(2000);
 // Limit how many lines we keep in the console log to prevent using too much memory.
 pub const MAX_LOG_LINES: usize = 1000;
 
+// --- Rendezvous Configuration ---
+/// Peer ID of the default Rendezvous server.
+pub const RENDEZVOUS_PEER_ID: &str = "12D3KooWExampleRendezvousPeerIDString12345";
+/// Multiaddress of the default Rendezvous server.
+pub const RENDEZVOUS_POINT_ADDRESS: &str = "/ip4/127.0.0.1/tcp/62648";

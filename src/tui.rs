@@ -1,5 +1,5 @@
 /*
-Code related to the Terminal User Interface (TUI)
+Code related to the Terminal User Interface (TUI).
 */
 
 // Import necessary TUI components from `ratatui`
@@ -18,7 +18,7 @@ use crossterm::event;
 // Standard library imports for file paths, data structures, time, and random numbers
 use std::path::PathBuf;
 use std::collections::HashMap;
-use std::time::{Instant, Duration};
+use std::time::Instant;
 use rand::Rng;
 
 // Import necessary libp2p types for network interaction
@@ -26,6 +26,7 @@ use libp2p::swarm::SwarmEvent;
 use libp2p::{Multiaddr, PeerId};
 // Import our custom network behavior events
 use crate::behavior::SwapBytesBehaviourEvent;
+use crate::constants::MAX_LOG_LINES;
 // Import tokio filesystem for file handling in DownloadState
 use tokio::fs::File as TokioFile;
 
@@ -78,9 +79,6 @@ pub enum PrivateChatItem {
         error: String,
     },
 }
-
-/// How long the "Pinging..." indicator stays visible after sending a ping.
-pub const PINGING_DURATION: Duration = Duration::from_millis(2000);
 
 /// Different modes the user can be in when interacting with the input boxes.
 #[derive(Debug, Default, PartialEq, Eq)]
@@ -257,8 +255,6 @@ impl Default for App {
     }
 }
 
-// Limit how many lines we keep in the console log to prevent using too much memory.
-const MAX_LOG_LINES: usize = 1000;
 
 // Methods for updating the `App` state.
 impl App {

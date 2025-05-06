@@ -24,6 +24,7 @@ pub fn process_command(command_input: &str, app: &mut App) -> Option<AppEvent> {
 
     // Figure out which command was entered and run the corresponding code.
     match command_name {
+        // -------------------------------------
         // Command: /ping <multiaddr>
         // Tries to connect to and ping another peer using their network address.
         "ping" => {
@@ -48,6 +49,7 @@ pub fn process_command(command_input: &str, app: &mut App) -> Option<AppEvent> {
             }
         }
 
+        // -------------------------------------
         // Command: /me
         // Shows the user's own information like network addresses, Peer ID, download directory, and nickname.
         "me" => {
@@ -84,6 +86,7 @@ pub fn process_command(command_input: &str, app: &mut App) -> Option<AppEvent> {
             app.push(format!("Visibility: {}", if app.is_visible { "Online" } else { "Hidden" }));
         }
 
+        // -------------------------------------
         // Command: /setdir <absolute_path>
         // Sets the directory where downloaded files will be saved.
         "setdir" => {
@@ -107,6 +110,7 @@ pub fn process_command(command_input: &str, app: &mut App) -> Option<AppEvent> {
             }
         }
 
+        // -------------------------------------
         // Command: /setname <nickname>
         // Sets the user's nickname, which others will see in chat and user lists.
         "setname" => {
@@ -137,6 +141,7 @@ pub fn process_command(command_input: &str, app: &mut App) -> Option<AppEvent> {
             }
         }
 
+        // -------------------------------------
         // Command: /chat <nickname|global>
         // Switches the chat view to either a private chat with a specific user (by nickname) or the global chat.
         "chat" => {
@@ -199,6 +204,7 @@ pub fn process_command(command_input: &str, app: &mut App) -> Option<AppEvent> {
             }
         }
 
+        // -------------------------------------
         // Command: /global
         // A shortcut to switch to the global chat view.
         "global" => {
@@ -212,6 +218,7 @@ pub fn process_command(command_input: &str, app: &mut App) -> Option<AppEvent> {
             app.reset_chat_cursor();
         }
 
+        // -------------------------------------
         // Command: /forget
         // Clears the list of known peers. Useful if the list gets cluttered or outdated.
         "forget" => {
@@ -220,6 +227,7 @@ pub fn process_command(command_input: &str, app: &mut App) -> Option<AppEvent> {
             app.push(format!("Forgot {} known peers.", num_peers));
         }
 
+        // -------------------------------------
         // Command: /hide
         // Makes the user appear offline to others by stopping heartbeat broadcasts.
         "hide" => {
@@ -233,6 +241,7 @@ pub fn process_command(command_input: &str, app: &mut App) -> Option<AppEvent> {
             }
         }
 
+        // -------------------------------------
         // Command: /show
         // Makes the user appear online again by resuming heartbeat broadcasts.
         "show" => {
@@ -246,6 +255,7 @@ pub fn process_command(command_input: &str, app: &mut App) -> Option<AppEvent> {
             }
         }
 
+        // -------------------------------------
         // Command: /quit or /q
         // Exits the application gracefully.
         "quit" | "q" => {
@@ -253,6 +263,7 @@ pub fn process_command(command_input: &str, app: &mut App) -> Option<AppEvent> {
             event_to_send = Some(AppEvent::Quit);
         }
 
+        // -------------------------------------
         // Command: /help or /h
         // Displays a list of available commands and their usage.
         "help" | "h" => {
@@ -276,6 +287,7 @@ pub fn process_command(command_input: &str, app: &mut App) -> Option<AppEvent> {
             app.push("  /help             - Show this help message.".to_string());
         }
 
+        // -------------------------------------
         // Command: /offer <file_path>
         // Offers a file to the peer in the current private chat context.
         "offer" => {
@@ -333,6 +345,7 @@ pub fn process_command(command_input: &str, app: &mut App) -> Option<AppEvent> {
             }
         }
 
+        // -------------------------------------
         // Command: /decline
         // Declines the most recent file offer received from the peer in the current private chat.
         "decline" => {
@@ -383,6 +396,7 @@ pub fn process_command(command_input: &str, app: &mut App) -> Option<AppEvent> {
             }
         }
 
+        // -------------------------------------
         // Command: /accept
         // Accepts the most recent file offer received from the peer in the current private chat.
         "accept" => {
@@ -461,6 +475,7 @@ pub fn process_command(command_input: &str, app: &mut App) -> Option<AppEvent> {
             }
         }
 
+        // ------------------------------------- 
         // Command: /myoffers
         // Lists all pending incoming file offers.
         "myoffers" => {
@@ -488,6 +503,7 @@ pub fn process_command(command_input: &str, app: &mut App) -> Option<AppEvent> {
             }
         }
 
+        // ------------------------------------- 
         // Command: /who <nickname>
         // Shows details about a specific user identified by their nickname.
         "who" => {
@@ -540,7 +556,8 @@ pub fn process_command(command_input: &str, app: &mut App) -> Option<AppEvent> {
             }
         }
 
-        // Handle any input that doesn't match a known command.
+        // -------------------------------------
+        // Unknown command
         _ => {
              // Only show the error if the user actually typed something (not just "/").
              if !command_name.is_empty() {

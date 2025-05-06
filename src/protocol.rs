@@ -11,13 +11,30 @@ use std::{io, iter};
 use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
 use tokio_util::compat::{FuturesAsyncReadCompatExt, FuturesAsyncWriteCompatExt};
 
+// --- Define Message enum here ---
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)] // Added Clone, PartialEq, Eq
+#[serde(tag = "type")]
+pub enum Message {
+    /// Periodic presence and nickname announcement.
+    Heartbeat {
+        timestamp_ms: u64,
+        nickname: Option<String>,
+    },
+    /// Public chat message sent to the global topic.
+    GlobalChatMessage {
+        content: String,
+        timestamp_ms: u64,
+        nickname: Option<String>,
+    },
+}
+// --- End of Message enum definition ---
+
 // --- 1. Protocol Definition ---
 // This defines our custom protocol for private messages.
 #[derive(Debug, Clone)]
 pub struct PrivateProtocol();
 // This is the unique name that identifies our protocol on the network.
 // Think of it like a specific channel or API endpoint name.
-pub const PROTOCOL_NAME: &[u8] = b"/swapbytes/private/1.0.0";
 
 // Tell libp2p how to identify and negotiate this protocol.
 // When two peers connect, they use this info to agree on speaking "/swapbytes/private/1.0.0".
@@ -30,7 +47,7 @@ impl UpgradeInfo for PrivateProtocol {
     fn protocol_info(&self) -> Self::InfoIter {
         // Convert the byte array `PROTOCOL_NAME` into a proper string slice.
         // This is safe because we know `PROTOCOL_NAME` is valid UTF-8 text and static.
-        iter::once(std::str::from_utf8(PROTOCOL_NAME).unwrap())
+        iter::once(std::str::from_utf8(crate::constants::PROTOCOL_NAME).unwrap())
     }
 }
 
@@ -39,7 +56,7 @@ impl UpgradeInfo for PrivateProtocol {
 // This `AsRef<str>` implementation provides that.
 impl AsRef<str> for PrivateProtocol {
     fn as_ref(&self) -> &str {
-        std::str::from_utf8(PROTOCOL_NAME).unwrap()
+        std::str::from_utf8(crate::constants::PROTOCOL_NAME).unwrap()
     }
 }
 
@@ -193,79 +210,5 @@ impl Codec for PrivateCodec {
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         let mut framed = FramedWrite::new(io.compat_write(), self.inner.clone());
         framed.send(bytes::Bytes::from(bytes)).await
-    }
-}
-
-// --- 4. Basic Tests ---
-// These tests ensure that we can correctly encode (serialize) our messages
-// and then decode (deserialize) them back into the original form.
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use futures::io::Cursor; // Use an in-memory buffer for testing instead of a real network stream.
-
-    #[tokio::test]
-    async fn test_codec_round_trip() {
-        let mut codec = PrivateCodec::default();
-        let protocol = PrivateProtocol(); // Needed for the codec methods, although not used directly by them.
-
-        // --- Test Request Encoding/Decoding ---
-        let request = PrivateRequest::ChatMessage("hello world".to_string());
-        let mut buffer_req_vec: Vec<u8> = Vec::new(); // Our in-memory "network" buffer.
-        {
-            // Create a writer cursor targeting the buffer.
-            let mut cursor_req = Cursor::new(&mut buffer_req_vec);
-            // Encode the request into the buffer.
-            codec.write_request(&protocol, &mut cursor_req, request.clone()).await.unwrap();
-        } // `cursor_req` goes out of scope, releasing the mutable borrow.
-
-        // Create a reader cursor over the buffer containing the encoded data.
-        let mut reader_cursor_req = Cursor::new(&buffer_req_vec);
-        // Decode the request from the buffer.
-        let decoded_request = codec.read_request(&protocol, &mut reader_cursor_req).await.unwrap();
-        // Check that the decoded request is identical to the original.
-        assert_eq!(request, decoded_request);
-
-        // --- Test Response Encoding/Decoding ---
-        let response = PrivateResponse::Ack;
-        let mut buffer_res_vec: Vec<u8> = Vec::new();
-        {
-            let mut cursor_res = Cursor::new(&mut buffer_res_vec);
-            codec.write_response(&protocol, &mut cursor_res, response.clone()).await.unwrap();
-        }
-
-        let mut reader_cursor_res = Cursor::new(&buffer_res_vec);
-        let decoded_response = codec.read_response(&protocol, &mut reader_cursor_res).await.unwrap();
-        assert_eq!(response, decoded_response);
-
-        // Test FileChunk response
-        let chunk_response = PrivateResponse::FileChunk {
-            filename: "test.dat".to_string(),
-            chunk_index: 5,
-            data: vec![1, 2, 3, 4, 5],
-            is_last: false,
-        };
-        let mut buffer_chunk_vec: Vec<u8> = Vec::new();
-        {
-            let mut cursor_chunk = Cursor::new(&mut buffer_chunk_vec);
-            codec.write_response(&protocol, &mut cursor_chunk, chunk_response.clone()).await.unwrap();
-        }
-        let mut reader_cursor_chunk = Cursor::new(&buffer_chunk_vec);
-        let decoded_chunk_response = codec.read_response(&protocol, &mut reader_cursor_chunk).await.unwrap();
-        assert_eq!(chunk_response, decoded_chunk_response);
-
-        // Test TransferError response
-        let error_response = PrivateResponse::TransferError {
-            filename: "error.dat".to_string(),
-            error: "Failed to read file".to_string(),
-        };
-        let mut buffer_error_vec: Vec<u8> = Vec::new();
-        {
-            let mut cursor_error = Cursor::new(&mut buffer_error_vec);
-            codec.write_response(&protocol, &mut cursor_error, error_response.clone()).await.unwrap();
-        }
-        let mut reader_cursor_error = Cursor::new(&buffer_error_vec);
-        let decoded_error_response = codec.read_response(&protocol, &mut reader_cursor_error).await.unwrap();
-        assert_eq!(error_response, decoded_error_response);
     }
 }

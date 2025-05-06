@@ -1,14 +1,6 @@
-# SwapBytes 🪙📁
+# SwapBytes 
 
-**A peer-to-peer file-bartering CLI built in Rust with [`libp2p`](https://libp2p.io) and an ergonomic TUI powered by [`ratatui`](https://github.com/ratatui-org/ratatui).**
-
-> _"Got notes? Need notes? Swap 'em."_ – **COSC 473 (2025)** Assignment 2
-
----
-
-## To Do
-- tidy up
-- README.md & write-up
+**A peer-to-peer file-bartering CLI built in Rust with [`libp2p`](https://libp2p.io) and an TUI powered by [`ratatui`](https://github.com/ratatui-org/ratatui).**
 
 ---
 
@@ -30,7 +22,6 @@
 ## What is SwapBytes?
 
 SwapBytes is a **CLI/TUI application** that lets users **barter files directly with one another** in a fully decentralised network.  
-It satisfies all baseline requirements for COSC 473 A2 and adds a polished text-user-interface plus extra QoL commands.
 
 - Written in **Rust 2024**.
 - Networked with **libp2p** (pub-sub + request/response).
@@ -46,7 +37,7 @@ It satisfies all baseline requirements for COSC 473 A2 and adds a polished text-
 | **User List** | Sidebar showing nicknames **+ PeerIDs**. Online status auto-refreshes every 2-8s. |
 | **Global Chat** | Simple room where every message is broadcast. |
 | **Private Chats** | One-on-one chat for negotiation and file offers. |
-| **File Swapping** | `/offer <file>` → `/accept | /decline` → direct transfer (max 100 MB). |
+| **File Swapping** | `/offer <file>` → `/accept | /decline` → direct transfer. |
 | **Ergonomic TUI** | Cross-platform Text User Interface powered by `ratatui`. |
 | **Auto mDNS** | Automatic mDNS connection to peers. |
 | **Command Interface** | Simple slash-commands entered in the Console pane. |
@@ -60,10 +51,10 @@ It satisfies all baseline requirements for COSC 473 A2 and adds a polished text-
 | **Directory Safety** | User-chosen **output directory** validated at startup and via `/setdir`. |
 | **Duplicate Nicknames** | Allowed, but each peer gets a warning if a clash is detected. |
 | **Help Command** | `/help` prints concise command help. |
-| **Direct Peer Interaction** | `/ping` command checks reachability and latency to specific peers. |
+| **Direct Peer Interaction** | `/ping` command provides a secondary method to connect to peers. |
 | **Nickname Handling** | Default random name (`userXXXX`); allows user-set names; handles duplicates gracefully. |
 | **Self-Information** | `/me` command displays current addresses, PeerID, download directory, nickname, and visibility. |
-| **Graceful Exit** | Cleanly shut down the application using `Ctrl+Q` or `/quit`. |
+| **Graceful Exit** | Cleanly shut down the application using `Ctrl+Q` or `/q`. |
 
 
 ---
@@ -71,6 +62,7 @@ It satisfies all baseline requirements for COSC 473 A2 and adds a polished text-
 ### User Interface Layout  
 
 **Global chat view:**
+
 ```
 ┌───────────────────────────────────────────────┬──────────────┐
 │               Global Chat                     │ Users        │
@@ -151,13 +143,13 @@ It satisfies all baseline requirements for COSC 473 A2 and adds a polished text-
     *   Using `/hide` stops sending heartbeats, causing the user to appear offline to others after the timeout, while `/show` resumes heartbeats.
 4.  **Manual Connection (Ping):** If mDNS fails (e.g., firewall, different network, specific OS issues) or for direct testing, users can establish a connection manually using `/ping <multiaddr>`. The required multiaddress can be found using `/me` on the target peer. This uses the `ping::Behaviour` to check reachability and implicitly establishes a persistent connection if successful. For testing two instances on the **same machine**, using the `/ip4/127.0.0.1/...` address is the most reliable way.
 5.  **Global Chat (Gossipsub):** Messages typed into the chat pane while in the `Global Chat` context are packaged and published to the shared `"swapbytes-global-chat"` using **Gossipsub**. All connected peers receive these messages and display them.
-6.  **Private Chat & Trade (Request/Response):** Interacting with specific users privately (via `/chat <name>`) and managing file trades (`/offer`, `/accept`, `/decline`) is planned to use libp2p's direct **Request/Response** protocol. This ensures messages and file transfer commands are sent only between the two involved peers.
+6.  **Private Chat & Trade (Request/Response):** Interacting with specific users privately (via `/chat <name>`) and managing file trades (`/offer`, `/accept`, `/decline`) uses libp2p's direct **Request/Response** protocol.
 
 ---
 
 ## Peer Discovery Challenges
 
-Our app can automatically find other users on a local network using mDNS. This also usually works with multiple instances on the same machine. However sometimes, especially on MacOS, this auto-discovery might not work when running instances on the *same* machine without being connected to a larger network. If the apps don't see each other automatically, it's easy to connect them manually: just use the `/me` command in one instance to get its multiaddr, and then use `/ping <multiaddr>` in the other instance to connect. 
+The app can automatically find other users on a local network using mDNS. This also usually works with multiple instances on the same machine. However sometimes, especially on MacOS, this auto-discovery might not work when running instances on the *same* machine without being connected to a larger network. If the apps don't see each other automatically, it's easy to connect them manually: just use the `/me` command in one instance to get its multiaddr, and then use `/ping <multiaddr>` in the other instance to connect. 
 
 You might also see a situation on certain restricted networks, like some university or corporate LANs, where peers *do* discover each other initially using their local network addresses. Despite this initial discovery, the network might block the specific communication protocols libp2p needs to establish a full, secure connection. This can lead to peers appearing online briefly in the user list but then quickly showing as offline because the connection handshake failed, preventing ongoing communication like heartbeats or chat messages from getting through.
 
@@ -177,13 +169,6 @@ cd swapbytes
 # Run
 cargo run
 ```
-
----
-
-## Future Features
-
-- [ ] Reputation points (+1/-1) persisted in a DHT.
-- [ ] More advanced back-and-forth trading UX.
 
 ---
 

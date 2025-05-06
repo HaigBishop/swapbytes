@@ -7,24 +7,29 @@ use std::{collections::hash_map::DefaultHasher, hash::{Hash, Hasher}, time::Dura
 use tokio::io; // Needed for mapping errors
 use crate::protocol::{PrivateCodec, PrivateRequest, PrivateResponse, PrivateProtocol};
 
-// This is the main behaviour handler for our P2P node.
-// Think of it as the brain that manages different P2P protocols together.
-// It bundles up: 
-//  - Gossipsub: For broadcasting messages to everyone (like global chat).
-//  - mDNS: For finding other nodes on the same local network.
-//  - Ping: For checking if another node is still online.
-//  - Request-Response: For direct, one-to-one messages (like private chat).
+// --- Behaviour Struct Definition ---
+
+// `SwapBytesBehaviour` bundles multiple libp2p protocols into a single logical unit.
+// This struct manages the combined behavior of the node's P2P interactions.
+// It derives `NetworkBehaviour` to integrate with the libp2p swarm.
 #[derive(NetworkBehaviour)]
-#[behaviour(to_swarm = "SwapBytesBehaviourEvent")] // Tells libp2p how to process events from this behaviour
+#[behaviour(to_swarm = "SwapBytesBehaviourEvent")] // Maps events from inner behaviours to the `SwapBytesBehaviourEvent` enum
 pub struct SwapBytesBehaviour {
+    /// Handles message broadcasting and propagation using the Gossipsub protocol.
     pub gossipsub: gossipsub::Behaviour,
+    /// Enables peer discovery on the local network using the mDNS protocol.
     pub mdns: mdns::tokio::Behaviour,
+    /// Manages PING requests to check peer liveness.
     pub ping: ping::Behaviour,
+    /// Facilitates direct request-response interactions between peers using a custom protocol.
     pub request_response: request_response::Behaviour<PrivateCodec>,
 }
 
-// This enum lists all the possible events that can come from our combined `SwapBytesBehaviour`.
-// It helps us figure out which protocol (Gossipsub, mDNS, Ping, etc.) generated an event.
+// --- Behaviour Event Enum ---
+
+// `SwapBytesBehaviourEvent` aggregates events emitted by the individual behaviours
+// within `SwapBytesBehaviour`. This allows the main event loop to handle events
+// from different protocols through a single enum type.
 #[derive(Debug)]
 pub enum SwapBytesBehaviourEvent {
     Gossipsub(gossipsub::Event),
@@ -33,10 +38,11 @@ pub enum SwapBytesBehaviourEvent {
     RequestResponse(request_response::Event<PrivateRequest, PrivateResponse>),
 }
 
-// These `From` implementations are helpers.
-// They automatically wrap events from the individual protocols (like `gossipsub::Event`)
-// into our main `SwapBytesBehaviourEvent` enum.
-// This makes handling events in the main loop much cleaner.
+// --- Event Conversion Implementations (`From` traits) ---
+
+// These implementations automatically convert events from specific protocol behaviours
+// (e.g., `gossipsub::Event`) into the unified `SwapBytesBehaviourEvent` enum.
+// This simplifies event handling logic in the main application loop.
 
 impl From<gossipsub::Event> for SwapBytesBehaviourEvent {
     fn from(event: gossipsub::Event) -> Self {
@@ -62,61 +68,68 @@ impl From<request_response::Event<PrivateRequest, PrivateResponse>> for SwapByte
     }
 }
 
+// --- Behaviour Implementation ---
 
 impl SwapBytesBehaviour {
-    // Sets up a new `SwapBytesBehaviour` instance.
-    // This involves creating and configuring all the individual protocol behaviours.
+    /// Constructs a new `SwapBytesBehaviour` instance.
+    /// Initializes and configures all the constituent protocol behaviours.
+    ///
+    /// # Argument: `keypair` - The node's identity keypair, used for signing messages and identification.
+    /// 
     pub fn new(keypair: &Keypair) -> Result<Self, io::Error> {
-        
-        // --- Gossipsub Setup --- 
-        // We need a way to uniquely identify gossipsub messages to avoid duplicates.
-        // This function creates a hash of the message content to use as an ID.
+
+        // --- Gossipsub Setup ---
+        // Define a function to generate unique IDs for gossipsub messages based on their content hash.
+        // This helps prevent processing duplicate messages.
         let message_id_fn = |message: &gossipsub::Message| {
             let mut s = DefaultHasher::new();
             message.data.hash(&mut s);
             gossipsub::MessageId::from(s.finish().to_string())
         };
 
-        // Configure gossipsub settings
+        // Configure the Gossipsub protocol settings.
         let gossipsub_config = gossipsub::ConfigBuilder::default()
-            .heartbeat_interval(Duration::from_secs(15)) // Regular pings to keep connections alive
-            .validation_mode(gossipsub::ValidationMode::Strict) // Enforce message validation
-            .message_id_fn(message_id_fn) // Use our custom message ID function
+            .heartbeat_interval(Duration::from_secs(15)) // Set the interval for heartbeat messages to maintain connections.
+            .validation_mode(gossipsub::ValidationMode::Strict) // Enforce strict validation of incoming messages.
+            .message_id_fn(message_id_fn) // Use the custom message ID function defined above.
             .build()
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?; // Convert error type
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?; // Map the configuration error to `io::Error`.
 
-        // Create the gossipsub behaviour
+        // Create the Gossipsub behaviour instance.
         let gossipsub = gossipsub::Behaviour::new(
-            gossipsub::MessageAuthenticity::Signed(keypair.clone()), // Sign messages with our keypair for security
+            gossipsub::MessageAuthenticity::Signed(keypair.clone()), // Ensure messages are signed with the node's keypair.
             gossipsub_config,
         )
-        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?; // Convert error type
+        .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?; // Map the creation error to `io::Error`.
 
-        // --- mDNS Setup --- 
-        // Create the mDNS behaviour for local peer discovery
+        // --- mDNS Setup ---
+        // Create the mDNS behaviour for discovering peers on the local network.
         let mdns = mdns::tokio::Behaviour::new(
-            mdns::Config::default(), // Use default mDNS settings
-            keypair.public().to_peer_id() // Use our peer ID for identification
+            mdns::Config::default(), // Use default mDNS configuration.
+            keypair.public().to_peer_id() // Identify the node using its PeerId derived from the public key.
         )?;
 
-        // --- Ping Setup --- 
-        // Create the Ping behaviour. We set a very long interval to effectively disable
-        // automatic keep-alive pings, as we handle presence differently (via gossipsub heartbeats).
+        // --- Ping Setup ---
+        // Create the Ping behaviour configuration.
+        // The interval is set very high to effectively disable automatic pings,
+        // as liveness can be inferred from Gossipsub heartbeats.
         let ping_config = ping::Config::new()
-            .with_interval(Duration::from_secs(3 * 60 * 60)); 
+            .with_interval(Duration::from_secs(3 * 60 * 60));
+        // Create the Ping behaviour instance.
         let ping = ping::Behaviour::new(ping_config);
 
-        // --- Request-Response Setup --- 
-        // Define the protocol(s) the request-response behaviour will use.
-        // Here, we're using our custom `PrivateProtocol` for direct messages.
+        // --- Request-Response Setup ---
+        // Define the protocols supported by the request-response behaviour.
+        // Here, it uses the custom `PrivateProtocol`.
         let request_response_protocols = iter::once((PrivateProtocol(), request_response::ProtocolSupport::Full));
-        // Create the request-response behaviour
+        // Create the Request-Response behaviour instance.
         let request_response = request_response::Behaviour::new(
-            request_response_protocols, // Tell it which protocols to speak
-            request_response::Config::default(), // Use default request-response settings
+            request_response_protocols, // Specify the supported protocols.
+            request_response::Config::default(), // Use default request-response configuration.
         );
 
-        // Bundle all the behaviours together
+        // --- Combine Behaviours ---
+        // Construct the `SwapBytesBehaviour` struct with all initialized behaviours.
         Ok(Self {
             gossipsub,
             mdns,

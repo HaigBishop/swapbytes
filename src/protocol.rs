@@ -11,112 +11,113 @@ use std::{io, iter};
 use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
 use tokio_util::compat::{FuturesAsyncReadCompatExt, FuturesAsyncWriteCompatExt};
 
-// --- Define Message enum here ---
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)] // Added Clone, PartialEq, Eq
+// --- Message Enum ---
+/// Represents messages exchanged over the network, primarily for presence and public chat.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
 #[serde(tag = "type")]
 pub enum Message {
-    /// Periodic presence and nickname announcement.
+    /// Periodic presence and nickname announcement sent over gossipsub.
     Heartbeat {
         timestamp_ms: u64,
         nickname: Option<String>,
     },
-    /// Public chat message sent to the global topic.
+    /// Public chat message sent to the global gossipsub topic.
     GlobalChatMessage {
         content: String,
         timestamp_ms: u64,
         nickname: Option<String>,
     },
 }
-// --- End of Message enum definition ---
 
-// --- 1. Protocol Definition ---
-// This defines our custom protocol for private messages.
+// --- Private Protocol Definition ---
+/// Defines the libp2p protocol structure for private, direct peer-to-peer interactions.
 #[derive(Debug, Clone)]
 pub struct PrivateProtocol();
-// This is the unique name that identifies our protocol on the network.
-// Think of it like a specific channel or API endpoint name.
 
-// Tell libp2p how to identify and negotiate this protocol.
-// When two peers connect, they use this info to agree on speaking "/swapbytes/private/1.0.0".
+/// Implements `UpgradeInfo` to advertise and negotiate the private protocol.
+/// Peers use this information to agree on using the "/swapbytes/private/1.0.0" protocol
+/// when establishing a direct request-response connection.
 impl UpgradeInfo for PrivateProtocol {
-    // The protocol name type will be a string that lives for the whole program ('static).
-    type Info = &'static str;
-    // We only provide one protocol name.
-    type InfoIter = iter::Once<Self::Info>;
+    type Info = &'static str; // The protocol name is a static string.
+    type InfoIter = iter::Once<Self::Info>; // We advertise exactly one protocol name.
 
+    /// Returns the canonical name of the protocol.
     fn protocol_info(&self) -> Self::InfoIter {
-        // Convert the byte array `PROTOCOL_NAME` into a proper string slice.
-        // This is safe because we know `PROTOCOL_NAME` is valid UTF-8 text and static.
+        // Retrieves the protocol name defined in `crate::constants::PROTOCOL_NAME`.
+        // Assumes the constant contains valid UTF-8.
         iter::once(std::str::from_utf8(crate::constants::PROTOCOL_NAME).unwrap())
     }
 }
 
-// Although `UpgradeInfo` handles negotiation, the `Codec` (defined below)
-// still needs a way to easily get the protocol name as a string.
-// This `AsRef<str>` implementation provides that.
+/// Provides a simple way to get the protocol name as a string slice.
+/// This is needed internally by the `Codec`.
 impl AsRef<str> for PrivateProtocol {
     fn as_ref(&self) -> &str {
         std::str::from_utf8(crate::constants::PROTOCOL_NAME).unwrap()
     }
 }
 
-// --- 2. Request/Response Message Types ---
-// These enums define the different kinds of messages we can send (Request)
-// and expect to receive back (Response) within our private protocol.
+// --- Private Request/Response Types ---
+/// Defines the types of requests that can be sent over the `PrivateProtocol`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PrivateRequest {
+    /// A simple text chat message sent directly to a peer.
     ChatMessage(String),
-    // File offer including filename and size
+    /// Initiates a file transfer by offering a file to the peer.
     Offer {
         filename: String,
         size_bytes: u64,
     },
-    /// Peer declines a file offer we previously sent them.
+    /// Informs the offering peer that the file offer is declined.
     DeclineOffer { filename: String },
-    /// Peer accepts a file offer we previously sent them.
+    /// Informs the offering peer that the file offer is accepted.
     AcceptOffer { filename: String },
-    // Request a specific chunk of a file.
+    /// Requests a specific chunk of a file during a transfer.
     RequestChunk {
         filename: String,
         chunk_index: u64,
     },
 }
 
+/// Defines the types of responses that can be received over the `PrivateProtocol`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PrivateResponse {
-    Ack, // General acknowledgement of message receipt
-    // Removed AcceptOffer/DeclineOffer variants as they are requests now.
-    // Response indicating a file chunk is being sent.
+    /// A generic acknowledgement that a request was received.
+    Ack,
+    /// A chunk of file data being sent in response to a `RequestChunk`.
     FileChunk {
         filename: String,
         chunk_index: u64,
         data: Vec<u8>,
+        /// Indicates if this is the final chunk of the file.
         is_last: bool,
     },
-    // Response indicating an error occurred during transfer.
+    /// Indicates an error occurred during the file transfer process.
     TransferError {
         filename: String,
-        error: String, // Simple error string for now
+        /// A description of the error.
+        error: String,
     },
 }
 
-// --- 3. Message Codec ---
-// The Codec handles turning our `PrivateRequest` and `PrivateResponse` objects
-// into bytes to send over the network (encoding) and turning received bytes
-// back into our objects (decoding). We're using JSON for this.
+// --- Private Message Codec ---
+/// Handles encoding (`PrivateRequest`/`PrivateResponse` to bytes) and
+/// decoding (bytes to `PrivateRequest`/`PrivateResponse`) for the `PrivateProtocol`.
+/// Uses JSON serialization and length-delimited framing.
 #[derive(Debug, Clone)]
 pub struct PrivateCodec {
-    // We use LengthDelimitedCodec to solve the "framing" problem.
-    // It prefixes each message with its length, so the receiver knows
-    // exactly how many bytes to read to get one complete message.
+    /// The underlying codec that handles message framing.
+    /// It prepends each message with its length, allowing the receiver
+    /// to know how many bytes constitute a single, complete message.
     inner: LengthDelimitedCodec,
 }
 
 impl Default for PrivateCodec {
     fn default() -> Self {
         Self {
-            // Use LengthDelimitedCodec for framing.
-            // Increase max frame length to 2 MiB to allow for larger chunks (e.g., 1MiB + overhead).
+            // Configure the length-delimited codec.
+            // Set a maximum frame length (e.g., 2 MiB) to accommodate large file chunks
+            // plus serialization overhead.
             inner: LengthDelimitedCodec::builder()
                 .max_frame_length(2 * 1024 * 1024) // 2 MiB
                 .new_codec(),
@@ -126,45 +127,46 @@ impl Default for PrivateCodec {
 
 #[async_trait]
 impl Codec for PrivateCodec {
-    type Protocol = PrivateProtocol; // The protocol this codec is for.
-    type Request = PrivateRequest; // The request type it handles.
-    type Response = PrivateResponse; // The response type it handles.
+    type Protocol = PrivateProtocol; // Associates this codec with `PrivateProtocol`.
+    type Request = PrivateRequest; // Specifies the request type it handles.
+    type Response = PrivateResponse; // Specifies the response type it handles.
 
-    // Decode bytes from the network stream into a `PrivateRequest`.
+    /// Reads bytes from the network stream and decodes them into a `PrivateRequest`.
     async fn read_request<T>(
         &mut self,
-        _: &Self::Protocol, // We don't need the protocol instance here.
-        io: &mut T,         // The network stream to read from.
+        _protocol: &Self::Protocol, // Protocol instance not needed for decoding.
+        io: &mut T,                // The asynchronous network stream.
     ) -> io::Result<Self::Request>
     where
         T: AsyncRead + Unpin + Send,
     {
-        // Wrap the raw stream `io` with our length-delimited codec.
+        // Adapt the tokio-based `io` stream for use with the futures-based `FramedRead`.
+        // `FramedRead` uses the `LengthDelimitedCodec` to read one complete message frame.
         let mut framed = FramedRead::new(io.compat(), self.inner.clone());
-        // Read the next complete frame (message). `compat()` adapts the tokio stream for futures::io.
         let frame = framed
             .next()
             .await
-            // If `next()` returns `None`, the stream ended unexpectedly.
+            // If `None` is returned, the stream closed unexpectedly.
             .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "Stream ended"))?
-            // The inner `?` handles potential errors from the stream itself.
+            // Propagate any I/O errors encountered while reading the frame.
             ?;
 
-        // Deserialize the received bytes (which should be JSON) into our `PrivateRequest` enum.
+        // Deserialize the received bytes (expected to be JSON) into a `PrivateRequest`.
+        // Map JSON deserialization errors to `io::Error` with `InvalidData` kind.
         serde_json::from_slice(&frame)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
     }
 
-    // Decode bytes from the network stream into a `PrivateResponse`.
+    /// Reads bytes from the network stream and decodes them into a `PrivateResponse`.
     async fn read_response<T>(
         &mut self,
-        _: &Self::Protocol,
+        _protocol: &Self::Protocol,
         io: &mut T,
     ) -> io::Result<Self::Response>
     where
         T: AsyncRead + Unpin + Send,
     {
-        // Same logic as `read_request`, but deserializes into `PrivateResponse`.
+        // Logic mirrors `read_request`, but deserializes into `PrivateResponse`.
         let mut framed = FramedRead::new(io.compat(), self.inner.clone());
         let frame = framed
             .next()
@@ -175,37 +177,38 @@ impl Codec for PrivateCodec {
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
     }
 
-    // Encode a `PrivateRequest` into bytes and write it to the network stream.
+    /// Encodes a `PrivateRequest` into bytes and writes it to the network stream.
     async fn write_request<T>(
         &mut self,
-        _: &Self::Protocol,
-        io: &mut T,          // The network stream to write to.
-        req: Self::Request, // The request object to send.
+        _protocol: &Self::Protocol, // Protocol instance not needed for encoding.
+        io: &mut T,                 // The asynchronous network stream.
+        req: Self::Request,        // The request object to encode and send.
     ) -> io::Result<()>
     where
         T: AsyncWrite + Unpin + Send,
     {
-        // Serialize the `PrivateRequest` object into JSON bytes.
+        // Serialize the `PrivateRequest` into JSON bytes.
+        // Map JSON serialization errors to `io::Error` with `InvalidData` kind.
         let bytes = serde_json::to_vec(&req)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-        // Wrap the raw stream `io` with our length-delimited codec for writing.
-        // `compat_write()` adapts the tokio stream for futures::io.
+        // Adapt the tokio-based `io` stream for use with the futures-based `FramedWrite`.
+        // `FramedWrite` uses the `LengthDelimitedCodec` to write the message frame (length-prefixed).
         let mut framed = FramedWrite::new(io.compat_write(), self.inner.clone());
-        // Send the bytes. The codec automatically prefixes it with the length.
+        // Send the serialized bytes. The codec handles adding the length prefix.
         framed.send(bytes::Bytes::from(bytes)).await
     }
 
-    // Encode a `PrivateResponse` into bytes and write it to the network stream.
+    /// Encodes a `PrivateResponse` into bytes and writes it to the network stream.
     async fn write_response<T>(
         &mut self,
-        _: &Self::Protocol,
+        _protocol: &Self::Protocol,
         io: &mut T,
-        res: Self::Response, // The response object to send.
+        res: Self::Response, // The response object to encode and send.
     ) -> io::Result<()>
     where
         T: AsyncWrite + Unpin + Send,
     {
-        // Same logic as `write_request`, but serializes a `PrivateResponse`.
+        // Logic mirrors `write_request`, but serializes a `PrivateResponse`.
         let bytes = serde_json::to_vec(&res)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
         let mut framed = FramedWrite::new(io.compat_write(), self.inner.clone());

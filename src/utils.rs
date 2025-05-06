@@ -6,6 +6,9 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+// --- libp2p Imports ---
+use libp2p::PeerId;
+
 /// Verifies if a given path is suitable as a download directory.
 ///
 /// Checks:
@@ -171,5 +174,18 @@ pub fn format_bytes(bytes: u64) -> String {
         format!("{:.1} {}", value, unit)
     } else {
         format!("{:.0} {}", value, unit)
+    }
+}
+
+// --- PeerId Utilities ---
+
+/// Converts a PeerId into a short, readable string (e.g., "user(...abcdef)").
+pub fn peer_id_to_short_string(peer_id: &PeerId) -> String {
+    let id_str = peer_id.to_base58();
+    let len = id_str.len();
+    if len <= 6 {
+        format!("user(...{})", id_str)
+    } else {
+        format!("user(...{})", &id_str[len - 6..])
     }
 }

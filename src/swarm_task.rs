@@ -2,9 +2,10 @@
 The main loop for the Swarm task.
 */
 
+// --- Imports ---
 use crate::{AppEvent, behavior::{SwapBytesBehaviour, SwapBytesBehaviourEvent}, protocol, constants, tui::DownloadState};
 use libp2p::{
-    gossipsub::{self, IdentTopic}, // Added IdentTopic here
+    gossipsub::{self, IdentTopic},
     mdns,
     request_response::{Event as RequestResponseEvent, Message as RequestResponseMessage},
     swarm::{Swarm, SwarmEvent},
@@ -21,128 +22,120 @@ use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 use chrono::Local;
 
+// --- Main Swarm Task Function ---
 #[allow(clippy::too_many_lines)]
 pub async fn run_swarm_loop(
     mut swarm: Swarm<SwapBytesBehaviour>,
-    swarm_tx: mpsc::UnboundedSender<AppEvent>,
-    mut cmd_rx: mpsc::UnboundedReceiver<AppEvent>,
-    swarm_cancel: CancellationToken,
+    swarm_tx: mpsc::UnboundedSender<AppEvent>, // Channel to send events back to the UI/main task
+    mut cmd_rx: mpsc::UnboundedReceiver<AppEvent>, // Channel to receive commands from the UI/main task
+    swarm_cancel: CancellationToken, // Used for graceful shutdown
     initial_nickname: Option<String>,
     initial_visibility: bool,
 ) {
-    // Store the current nickname locally within the swarm task
-    let mut current_nickname = initial_nickname;
-    // Store the current visibility state locally within the swarm task
-    let mut is_visible = initial_visibility;
-    // Initialize local state for download directory and outgoing transfers
-    let mut download_dir: Option<PathBuf> = None;
+    // --- Local State ---
+    let mut current_nickname = initial_nickname; // User's current nickname for gossipsub messages
+    let mut is_visible = initial_visibility; // Whether the user is broadcasting presence
+    let mut download_dir: Option<PathBuf> = None; // Directory for saving incoming files
+    // Stores the local path of files being offered to peers. Key: (PeerId, filename)
     let mut outgoing_transfers: HashMap<(PeerId, String), PathBuf> = HashMap::new();
-    // Initialize map for incoming transfer states within the swarm task
+    // Stores the state of incoming file transfers. Key: PeerId -> (filename -> DownloadState)
     let mut incoming_transfers_state: HashMap<PeerId, HashMap<String, crate::tui::DownloadState>> = HashMap::new();
-    // Heartbeat interval timer
-    let mut heartbeat_timer = interval(constants::HEARTBEAT_INTERVAL);
-    // Define the topic here once
-    let topic = IdentTopic::new(constants::SWAPBYTES_TOPIC);
+    let mut heartbeat_timer = interval(constants::HEARTBEAT_INTERVAL); // Timer for periodic heartbeat broadcasts
+    let topic = IdentTopic::new(constants::SWAPBYTES_TOPIC); // Gossipsub topic for general communication
 
+    // --- Main Event Loop ---
     loop {
         tokio::select! {
-            // Graceful shutdown
+            // --- Graceful Shutdown ---
+            // Listen for cancellation signal
             _ = swarm_cancel.cancelled() => break,
 
             // --- Heartbeat Broadcaster ---
+            // Periodically send heartbeat messages if visible
             _ = heartbeat_timer.tick() => {
-                // Only send heartbeat if visible
                 if is_visible {
-                    // Log heartbeat sending
-                    // let _ = swarm_tx.send(AppEvent::LogMessage(format!("[Swarm] Sending heartbeat (visible: {})", is_visible)));
                     // Get current timestamp in milliseconds
                     let timestamp_ms = SystemTime::now()
                         .duration_since(UNIX_EPOCH)
                         .expect("Time went backwards")
-                        .as_millis() as u64; // Use u64
+                        .as_millis() as u64;
 
+                    // Construct the heartbeat message
                     let heartbeat_msg = protocol::Message::Heartbeat {
                         timestamp_ms,
                         nickname: current_nickname.clone(),
                     };
 
+                    // Serialize and publish the heartbeat message via gossipsub
                     match serde_json::to_vec(&heartbeat_msg) {
                         Ok(encoded_msg) => {
                             if let Err(e) = swarm.behaviour_mut().gossipsub.publish(topic.clone(), encoded_msg) {
-                                // Ignore these errors: "Failed to publish heartbeat: InsufficientPeers"
+                                // Log errors, ignoring "InsufficientPeers" as it's expected sometimes
                                 if e.to_string() != "InsufficientPeers" {
-                                    // Log error, but don't crash the task
                                     let _ = swarm_tx.send(AppEvent::LogMessage(format!("Failed to publish heartbeat: {e}")));
                                 }
                             }
                         }
                         Err(e) => {
-                             // Log serialization error
                              let _ = swarm_tx.send(AppEvent::LogMessage(format!("Failed to serialize heartbeat: {e}")));
                         }
                     }
-                } // else: do nothing if not visible
+                }
             }
 
-            // Handle commands from the UI (e.g., Dial)
+            // --- Command Handling ---
+            // Process commands received from the UI task via the command channel
             Some(cmd) = cmd_rx.recv() => {
                 match cmd {
+                    // --- Dial Command ---
                     AppEvent::Dial(addr) => {
                         let log_msg = match swarm.dial(addr.clone()) {
                             Ok(()) => format!("Dialing {addr}"),
                             Err(e) => format!("Dial error: {e}"),
                         };
-                        // Send log message back to UI
                         let _ = swarm_tx.send(AppEvent::LogMessage(log_msg));
                     }
-                    // Handle nickname updates from the UI/commands
+                    // --- Nickname Update Command ---
                     AppEvent::NicknameUpdated(_peer_id, nickname) => {
-                        // Update the nickname stored within the swarm task
+                        // Update the local nickname state
                         current_nickname = Some(nickname);
                     }
-                    // Handle visibility changes from the UI/commands
+                    // --- Visibility Change Command ---
                     AppEvent::VisibilityChanged(new_visibility) => {
                         is_visible = new_visibility;
                     }
-                    // Handle publishing gossipsub messages
+                    // --- Publish Gossipsub Command ---
                     AppEvent::PublishGossipsub(data) => {
+                        // Publish raw data provided by the UI (e.g., global chat messages)
                         if let Err(e) = swarm.behaviour_mut().gossipsub.publish(topic.clone(), data) {
-                            // Ignore InsufficientPeers, log other messages though
                             if e.to_string() != "InsufficientPeers" {
                                 let _ = swarm_tx.send(AppEvent::LogMessage(format!("Failed to publish chat message: {e}")));
                             }
                         }
                     }
-                    // Handle sending private messages via Request/Response
+                    // --- Send Private Message Command ---
                     AppEvent::SendPrivateMessage { target_peer, message } => {
                         let request = protocol::PrivateRequest::ChatMessage(message);
-                        // Send the request
+                        // Use the request-response protocol to send a private message
                         swarm.behaviour_mut().request_response.send_request(&target_peer, request);
-                        // Log the attempt (optional)
-                        // let _ = swarm_tx.send(AppEvent::LogMessage(format!("Sent private message request to {}", target_peer)));
                     }
-                    // Handle sending file offers
+                    // --- Send File Offer Command ---
                     AppEvent::SendFileOffer { target_peer, file_path } => {
                         match std::fs::metadata(&file_path) {
                             Ok(metadata) => {
-                                // let _ = swarm_tx.send(AppEvent::LogMessage(format!("[Swarm Task] Preparing SendFileOffer event for {} to {}", file_path.display(), target_peer)));
                                 if metadata.is_file() {
                                     let size_bytes = metadata.len();
-                                    // Extract filename from path
                                     let filename = file_path.file_name().map_or_else(
                                         || "unknown_file".to_string(), // Fallback filename
                                         |os_name| os_name.to_string_lossy().into_owned()
                                     );
 
-                                    // <<< Store mapping immediately so RequestChunk can be served even before AcceptOffer arrives >>>
+                                    // Store the file path immediately to handle potential RequestChunk before AcceptOffer
                                     outgoing_transfers.insert((target_peer, filename.clone()), file_path.clone());
-                                    // let _ = swarm_tx.send(AppEvent::LogMessage(format!("[Swarm Task] Stored pending offer for '{}' to {}", filename, target_peer)));
 
+                                    // Construct and send the Offer request via request-response
                                     let request = protocol::PrivateRequest::Offer { filename: filename.clone(), size_bytes };
-                                    // Send the request
                                     swarm.behaviour_mut().request_response.send_request(&target_peer, request);
-                                    // Log after attempting send
-                                    // let _ = swarm_tx.send(AppEvent::LogMessage(format!("[Swarm Task] Attempted send_request (Offer) to {} for {}", target_peer, file_path.display())));
                                 } else {
                                     let _ = swarm_tx.send(AppEvent::LogMessage(format!("Error: Offer path is not a file: {}", file_path.display())));
                                 }
@@ -152,41 +145,33 @@ pub async fn run_swarm_loop(
                             }
                         }
                     }
-                    // Handle declining file offers
+                    // --- Decline File Offer Command ---
                     AppEvent::DeclineFileOffer { target_peer, filename } => {
-                        // <<< Remove mapping if exists >>>
+                        // Remove the pending offer from local state if it exists
                         outgoing_transfers.remove(&(target_peer, filename.clone()));
+                        // Construct and send the DeclineOffer request via request-response
                         let request = protocol::PrivateRequest::DeclineOffer { filename };
-                        // Send the request
                         swarm.behaviour_mut().request_response.send_request(&target_peer, request);
-                        // Log the attempt (optional)
-                        // let _ = swarm_tx.send(AppEvent::LogMessage(format!("[Swarm Task] Sent DeclineOffer request to {} for file {}", target_peer, filename)));
                     }
-                    // Handle accepting file offers
+                    // --- Accept File Offer Command ---
                     AppEvent::SendAcceptOffer { target_peer, filename, size_bytes } => {
-                        // Send the AcceptOffer network request *first*
+                        // Send the AcceptOffer network request *first* to notify the sender
                         let accept_request = protocol::PrivateRequest::AcceptOffer { filename: filename.clone() };
                         swarm.behaviour_mut().request_response.send_request(&target_peer, accept_request);
 
-                        // Now, initiate the download process
-                        let filename_c = filename.clone(); // Clone for state map key
-                        // Use the local, mutable download_dir variable now
+                        // Begin the local download process
+                        let filename_c = filename.clone(); // Clone needed for map key
                         match download_dir.as_deref() {
                             Some(dir) => {
-                                // Construct temporary file path
+                                // Construct temporary file path (e.g., file.ext.tmp)
                                 let temp_filename = format!("{}.tmp", filename);
                                 let mut temp_path = PathBuf::from(dir);
                                 temp_path.push(&temp_filename);
 
-                                // Attempt to create the file
+                                // Attempt to create the temporary file
                                 match TokioFile::create(&temp_path).await {
                                     Ok(file) => {
-                                        // let _ = swarm_tx.send(AppEvent::LogMessage(format!(
-                                        //     "[Swarm Task] Created temp file for download: {}",
-                                        //     temp_path.display()
-                                        // )));
-
-                                        // Create DownloadState
+                                        // Create the initial download state
                                         let download_state = DownloadState {
                                             local_path: temp_path.clone(), // Store the temp path
                                             total_size: size_bytes,
@@ -195,121 +180,103 @@ pub async fn run_swarm_loop(
                                             file, // Move file handle into state
                                         };
 
-                                        // Store state in the task's map
+                                        // Store the download state associated with the peer and filename
                                         incoming_transfers_state
                                             .entry(target_peer)
                                             .or_default()
                                             .insert(filename_c, download_state);
 
-                                        // Send RequestChunk for chunk 0
+                                        // Send the initial RequestChunk (chunk 0) to start the transfer
                                         let chunk_request = protocol::PrivateRequest::RequestChunk {
                                             filename: filename.clone(),
                                             chunk_index: 0
                                         };
                                         swarm.behaviour_mut().request_response.send_request(&target_peer, chunk_request);
-                                        // let _ = swarm_tx.send(AppEvent::LogMessage(format!(
-                                        //     "[Swarm Task] Sent RequestChunk 0 for '{}' to {}",
-                                        //     filename, target_peer
-                                        // )));
                                     }
                                     Err(e) => {
-                                        // Failed to create temp file
+                                        // Failed to create the temporary file, log error
                                         let _ = swarm_tx.send(AppEvent::LogMessage(format!(
                                             "[Swarm Task] Error creating temp file '{}': {}",
                                             temp_path.display(), e
                                         )));
-                                        // TODO: Send FileTransferFailed event back to UI?
+                                        // TODO: Consider sending FileTransferFailed to UI
                                     }
                                 }
                             }
                             None => {
-                                // Download directory not set
+                                // Download directory is not set, cannot accept offer
                                 let _ = swarm_tx.send(AppEvent::LogMessage(
                                     "[Swarm Task] Error: Cannot accept offer because download directory is not set.".to_string()
                                 ));
-                                // TODO: Send FileTransferFailed event back to UI?
+                                // TODO: Consider sending FileTransferFailed to UI
                             }
                         }
                     }
-                    // Handle download directory changes
+                    // --- Download Directory Change Command ---
                     AppEvent::DownloadDirChanged(new_dir) => {
+                        // Update the local download directory path
                         download_dir = new_dir;
-                        // Optional: log the change
-                        // let log_msg = format!("[Swarm Task] Download directory updated: {:?}", download_dir);
-                        // let _ = swarm_tx.send(AppEvent::LogMessage(log_msg));
                     }
-                    // Handle registering outgoing transfers
+                    // --- Register Outgoing Transfer Command ---
+                    // This is typically used when an offer is accepted by a remote peer
                     AppEvent::RegisterOutgoingTransfer { peer_id, filename, path } => {
-                        // <<< Log receipt of RegisterOutgoingTransfer command >>>
-                        // let _ = swarm_tx.send(AppEvent::LogMessage(format!("[Swarm Task] Received RegisterOutgoingTransfer command for '{}' to {} (Path: {:?})", filename, peer_id, path)));
+                        // Store the mapping for an active outgoing transfer
                         outgoing_transfers.insert((peer_id, filename.clone()), path);
-                        // Optional: log the registration
-                        // let log_msg = format!("[Swarm Task] Registered outgoing transfer for '{}' to {}", filename, peer_id);
-                        // let _ = swarm_tx.send(AppEvent::LogMessage(log_msg));
                     }
-                    // Ignore other commands if any were sent here by mistake
+                    // Ignore any other unexpected commands
                     _ => {}
                 }
             }
 
 
-            // Handle Swarm events
+            // --- Swarm Event Handling ---
+            // Process events generated by the libp2p Swarm
             ev = swarm.next() => {
                 if let Some(event) = ev {
                     match event {
+                        // --- mDNS Events ---
                         SwarmEvent::Behaviour(SwapBytesBehaviourEvent::Mdns(mdns::Event::Discovered(list))) => {
                             for (peer_id, _multiaddr) in list {
-                                // Log mDNS discovery (optional)
-                                // let _ = swarm_tx.send(AppEvent::LogMessage(format!("mDNS Discovered: {peer_id}")));
-                                // Add the newly discovered peer to Gossipsub's routing table
+                                // Add newly discovered peers to Gossipsub for routing
                                 swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
-                                // Send event to UI task
+                                // Notify the UI about the discovered peer
                                 let _ = swarm_tx.send(AppEvent::PeerDiscovered(peer_id));
                             }
                         }
                         SwarmEvent::Behaviour(SwapBytesBehaviourEvent::Mdns(mdns::Event::Expired(list))) => {
                             for (peer_id, _multiaddr) in list {
-                                // Log mDNS expiry (optional)
-                                // let _ = swarm_tx.send(AppEvent::LogMessage(format!("mDNS Expired: {peer_id}")));
-                                // Remove the peer from Gossipsub's routing table
+                                // Remove expired peers from Gossipsub
                                 swarm.behaviour_mut().gossipsub.remove_explicit_peer(&peer_id);
-                                // Send event to UI task
-                                // We now rely on heartbeat timeout, so PeerExpired from mDNS is less critical
-                                // We could still send it, but let's comment it out to rely purely on heartbeat for status
-                                // let _ = swarm_tx.send(AppEvent::PeerExpired(peer_id));
                             }
                         }
-                        // --- Handle Gossipsub Messages ---
+                        // --- Gossipsub Message Events ---
                         SwarmEvent::Behaviour(SwapBytesBehaviourEvent::Gossipsub(gossipsub::Event::Message {
-                            propagation_source: peer_id, // The peer who forwarded us the message
+                            propagation_source: peer_id, // The peer who forwarded the message
                             message_id: _id,
                             message,
                         })) => {
-                            // Attempt to deserialize the message
+                            // Attempt to deserialize the incoming gossipsub message data
                             match serde_json::from_slice::<protocol::Message>(&message.data) {
                                 Ok(deserialized_msg) => {
-                                    // Log raw message reception before processing
-                                    // let _ = swarm_tx.send(AppEvent::LogMessage(format!("[Swarm] Received Gossipsub msg ({} bytes) from {}", message.data.len(), peer_id)));
                                     match deserialized_msg {
+                                        // Handle Heartbeat messages
                                         protocol::Message::Heartbeat { timestamp_ms: _, nickname } => {
-                                            // Send NicknameUpdated event if nickname is present
+                                            // Update nickname if provided
                                             if let Some(nick) = nickname {
-                                                // Use the actual source peer ID from the message if available,
-                                                // otherwise, we assume the forwarder is the source for nickname updates.
-                                                // NOTE: For gossipsub, message.source is usually None unless message signing is enabled.
+                                                // Use the message source if available (requires signing), else use the forwarder
                                                 let source_peer_id = message.source.unwrap_or(peer_id);
                                                 let _ = swarm_tx.send(AppEvent::NicknameUpdated(source_peer_id, nick));
                                             }
-                                            // Also forward the raw event to update the forwarder's last_seen
+                                            // Forward the raw event to update the forwarder's last_seen time in the UI
                                             let _ = swarm_tx.send(AppEvent::Swarm(SwarmEvent::Behaviour(SwapBytesBehaviourEvent::Gossipsub(gossipsub::Event::Message {
                                                 propagation_source: peer_id,
                                                 message_id: _id,
-                                                message: message.clone(), // Clone message needed here
+                                                message: message.clone(),
                                             }))));
                                         }
+                                        // Handle Global Chat messages
                                         protocol::Message::GlobalChatMessage { content, timestamp_ms, nickname } => {
-                                            // Send the specific GlobalMessageReceived event
-                                            // Use the actual source peer ID if available, otherwise use the forwarder
+                                            // Send a specific event to the UI for global chat messages
                                             let source_peer_id = message.source.unwrap_or(peer_id);
                                             let _ = swarm_tx.send(AppEvent::GlobalMessageReceived {
                                                 sender_id: source_peer_id,
@@ -317,140 +284,138 @@ pub async fn run_swarm_loop(
                                                 content,
                                                 timestamp_ms,
                                             });
-                                            // Also forward the raw event to update the forwarder's last_seen
+                                            // Forward the raw event to update the forwarder's last_seen time
                                              let _ = swarm_tx.send(AppEvent::Swarm(SwarmEvent::Behaviour(SwapBytesBehaviourEvent::Gossipsub(gossipsub::Event::Message {
                                                 propagation_source: peer_id,
                                                 message_id: _id,
-                                                message: message.clone(), // Clone message needed here
+                                                message: message.clone(),
                                             }))));
                                         }
                                     }
                                 }
                                 Err(e) => {
-                                    // Log deserialization error, but still forward raw event for presence
+                                    // Log deserialization error, but still forward the raw event for presence tracking
                                     let _ = swarm_tx.send(AppEvent::LogMessage(format!("[Swarm] Failed to deserialize gossipsub msg from {}: {}", peer_id, e)));
                                     let _ = swarm_tx.send(AppEvent::Swarm(SwarmEvent::Behaviour(SwapBytesBehaviourEvent::Gossipsub(gossipsub::Event::Message {
                                         propagation_source: peer_id,
                                         message_id: _id,
-                                        message: message.clone(), // Clone message needed here
+                                        message: message.clone(),
                                     }))));
                                 }
                             }
                         }
-                        // --- Handle Request/Response Events ---
+                        // --- Request/Response Events ---
                         SwarmEvent::Behaviour(SwapBytesBehaviourEvent::RequestResponse(event)) => {
                             match event {
+                                // --- Incoming Request ---
                                 RequestResponseEvent::Message { peer, message, .. } => match message {
                                     RequestResponseMessage::Request { request, channel, .. } => {
                                         match request {
+                                            // --- Handle Incoming Private Chat Message ---
                                             protocol::PrivateRequest::ChatMessage(text) => {
-                                                // Send PrivateMessageReceived event to UI task
+                                                // Notify UI of the received private message
                                                 if let Err(e) = swarm_tx.send(AppEvent::PrivateMessageReceived {
                                                     sender_id: peer,
                                                     content: text,
                                                 }) {
-                                                    // Log if sending to UI fails
                                                     eprintln!("[Swarm] Error sending PrivateMessageReceived to UI: {}", e);
                                                 }
-
-                                                // Send Ack response
+                                                // Send an acknowledgement response
                                                 if let Err(e) = swarm.behaviour_mut().request_response.send_response(channel, protocol::PrivateResponse::Ack) {
                                                     let _ = swarm_tx.send(AppEvent::LogMessage(format!("[Swarm] Error sending Ack response to {}: {:?}", peer, e)));
                                                 }
                                             }
-                                            // Handle incoming file offers
+                                            // --- Handle Incoming File Offer ---
                                             protocol::PrivateRequest::Offer { filename, size_bytes } => {
-                                                // let _ = swarm_tx.send(AppEvent::LogMessage(format!("[Swarm Task] Received Offer request from {}: File '{}' ({} bytes)", peer, filename, size_bytes)));
-                                                // Send FileOfferReceived event to UI task
+                                                // Notify UI of the received file offer
                                                 if let Err(e) = swarm_tx.send(AppEvent::FileOfferReceived {
                                                     sender_id: peer,
-                                                    filename: filename.clone(), // Clone filename
+                                                    filename: filename.clone(),
                                                     size_bytes,
                                                 }) {
                                                     eprintln!("[Swarm] Error sending FileOfferReceived to UI: {}", e);
                                                 }
-
-                                                // Send Ack response to confirm receipt of the offer message
+                                                // Send an acknowledgement response
                                                 if let Err(e) = swarm.behaviour_mut().request_response.send_response(channel, protocol::PrivateResponse::Ack) {
                                                     let _ = swarm_tx.send(AppEvent::LogMessage(format!("[Swarm] Error sending Ack response to {}: {:?}", peer, e)));
                                                 }
                                             }
-                                            // Handle incoming decline messages
+                                            // --- Handle Incoming Decline Offer Message ---
                                             protocol::PrivateRequest::DeclineOffer { filename } => {
-                                                // Notify the UI that the offer was declined by the peer
+                                                // Notify UI that the remote peer declined an offer we sent
                                                 if let Err(e) = swarm_tx.send(AppEvent::FileOfferDeclined { peer_id: peer, filename }) {
                                                     eprintln!("[Swarm] Error sending FileOfferDeclined to UI: {}", e);
                                                 }
-                                                // Acknowledge receipt of the decline message
+                                                // Send an acknowledgement response
                                                 if let Err(e) = swarm.behaviour_mut().request_response.send_response(channel, protocol::PrivateResponse::Ack) {
                                                     let _ = swarm_tx.send(AppEvent::LogMessage(format!("[Swarm] Error sending Ack response to {}: {:?}", peer, e)));
                                                 }
                                             }
-                                            // Handle incoming accept offer messages
+                                            // --- Handle Incoming Accept Offer Message ---
                                             protocol::PrivateRequest::AcceptOffer { filename } => {
-                                                // <<< Log receipt of AcceptOffer >>>
-                                                // let _ = swarm_tx.send(AppEvent::LogMessage(format!("[Swarm Task] Received AcceptOffer from {} for '{}'", peer, filename)));
-                                                // Notify the UI that the offer was accepted by the peer
-                                                if let Err(e) = swarm_tx.send(AppEvent::FileOfferAccepted { peer_id: peer, filename: filename.clone() }) { // Clone filename here
+                                                // Notify UI that the remote peer accepted an offer we sent
+                                                // This typically triggers the `RegisterOutgoingTransfer` command handler
+                                                if let Err(e) = swarm_tx.send(AppEvent::FileOfferAccepted { peer_id: peer, filename: filename.clone() }) {
                                                     eprintln!("[Swarm] Error sending FileOfferAccepted to UI: {}", e);
                                                 }
-                                                // Acknowledge receipt of the accept message
+                                                // Send an acknowledgement response
                                                 if let Err(e) = swarm.behaviour_mut().request_response.send_response(channel, protocol::PrivateResponse::Ack) {
                                                     let _ = swarm_tx.send(AppEvent::LogMessage(format!("[Swarm] Error sending Ack response to {}: {:?}", peer, e)));
                                                 }
                                             }
-                                            // --- Handle incoming chunk requests ---
+                                            // --- Handle Incoming Chunk Request ---
                                             protocol::PrivateRequest::RequestChunk { filename, chunk_index } => {
-                                                // <<< Log before lookup >>>
-                                                // let _ = swarm_tx.send(AppEvent::LogMessage(format!("[Swarm Task] Handling RequestChunk({}, {}) from {}. Checking map...", filename, chunk_index, peer)));
-
-                                                // Use the local, mutable outgoing_transfers variable now
+                                                // Check if we have an active outgoing transfer registered for this peer/file
                                                 let response = match outgoing_transfers.get(&(peer, filename.clone())) {
                                                     Some(file_path) => {
-                                                        // File path found, attempt to read the chunk
+                                                        // Attempt to open the local file
                                                         match tokio::fs::File::open(file_path).await {
                                                             Ok(mut file) => {
-                                                                // Get file size first, handling potential error
+                                                                // Get file size to calculate offset and check bounds
                                                                 let file_size = match file.metadata().await {
                                                                     Ok(meta) => meta.len(),
                                                                     Err(e) => {
-                                                                        // Failed to get metadata, send error response and stop processing this request
+                                                                        // Error getting metadata, send error response
                                                                         let _ = swarm_tx.send(AppEvent::LogMessage(format!("[Swarm Task] Error getting metadata for '{}': {}", filename, e)));
                                                                         let error_response = protocol::PrivateResponse::TransferError {
                                                                             filename: filename.clone(),
                                                                             error: format!("Failed to get file metadata: {}", e),
                                                                         };
-                                                                        // Send error response immediately
                                                                         if let Err(send_err) = swarm.behaviour_mut().request_response.send_response(channel, error_response) {
                                                                             let _ = swarm_tx.send(AppEvent::LogMessage(format!("[Swarm] Error sending metadata TransferError response to {}: {:?}", peer, send_err)));
                                                                         }
-                                                                        return; // Stop processing this RequestChunk
+                                                                        return; // Stop processing this request
                                                                     }
                                                                 };
 
+                                                                // Calculate the byte offset for the requested chunk
                                                                 let offset = chunk_index * crate::constants::CHUNK_SIZE as u64;
                                                                 if offset >= file_size {
-                                                                    // Requested chunk beyond file size (shouldn't normally happen if receiver tracks size)
+                                                                    // Chunk index is out of bounds, send error
                                                                     protocol::PrivateResponse::TransferError {
                                                                         filename: filename.clone(),
                                                                         error: "Requested chunk index out of bounds".to_string(),
                                                                     }
                                                                 } else {
+                                                                    // Prepare buffer for reading the chunk
                                                                     let mut buffer = vec![0u8; crate::constants::CHUNK_SIZE];
-                                                                    // Seek to the correct position
+                                                                    // Seek to the calculated offset in the file
                                                                     if let Err(e) = file.seek(std::io::SeekFrom::Start(offset)).await {
+                                                                         // Error seeking, send error response
                                                                          let _ = swarm_tx.send(AppEvent::LogMessage(format!("[Swarm Task] Error seeking file '{}' at offset {}: {}", filename, offset, e)));
                                                                          protocol::PrivateResponse::TransferError {
                                                                             filename: filename.clone(),
                                                                             error: format!("Failed to seek file: {}", e),
                                                                         }
                                                                     } else {
-                                                                        // Read the chunk
+                                                                        // Read the chunk data into the buffer
                                                                         match file.read(&mut buffer).await {
                                                                             Ok(bytes_read) => {
-                                                                                // Resize buffer to actual bytes read
+                                                                                // Adjust buffer size to actual bytes read
                                                                                 buffer.truncate(bytes_read);
+                                                                                // Determine if this is the last chunk
                                                                                 let is_last = (offset + bytes_read as u64) >= file_size;
+                                                                                // Construct the FileChunk response
                                                                                 protocol::PrivateResponse::FileChunk {
                                                                                     filename: filename.clone(),
                                                                                     chunk_index,
@@ -459,7 +424,7 @@ pub async fn run_swarm_loop(
                                                                                 }
                                                                             }
                                                                             Err(e) => {
-                                                                                // Failed to read chunk
+                                                                                // Error reading chunk, send error response
                                                                                 let _ = swarm_tx.send(AppEvent::LogMessage(format!("[Swarm Task] Error reading chunk {} for file '{}': {}", chunk_index, filename, e)));
                                                                                 protocol::PrivateResponse::TransferError {
                                                                                     filename: filename.clone(),
@@ -471,7 +436,7 @@ pub async fn run_swarm_loop(
                                                                 }
                                                             }
                                                             Err(e) => {
-                                                                // Failed to open file
+                                                                // Error opening file, send error response
                                                                 let _ = swarm_tx.send(AppEvent::LogMessage(format!("[Swarm Task] Error opening file '{}' for transfer: {}", filename, e)));
                                                                 protocol::PrivateResponse::TransferError {
                                                                     filename: filename.clone(),
@@ -481,8 +446,7 @@ pub async fn run_swarm_loop(
                                                         }
                                                     }
                                                     None => {
-                                                        // No outgoing transfer registered for this peer/filename combination
-                                                        // let _ = swarm_tx.send(AppEvent::LogMessage(format!("[Swarm Task] Received RequestChunk for unknown transfer: Peer {}, File '{}'", peer, filename)));
+                                                        // No active transfer found for this request, send error
                                                         protocol::PrivateResponse::TransferError {
                                                             filename: filename.clone(),
                                                             error: "No active transfer found for this file".to_string(),
@@ -490,49 +454,47 @@ pub async fn run_swarm_loop(
                                                     }
                                                 };
 
-                                                // Send the response (FileChunk or TransferError)
+                                                // Send the constructed response (either FileChunk or TransferError)
                                                 if let Err(e) = swarm.behaviour_mut().request_response.send_response(channel, response) {
                                                     let _ = swarm_tx.send(AppEvent::LogMessage(format!("[Swarm] Error sending chunk/error response to {}: {:?}", peer, e)));
                                                 }
                                             }
                                         }
                                     }
+                                    // --- Incoming Response ---
                                     RequestResponseMessage::Response { request_id, response } => {
                                         match response {
+                                            // --- Handle Acknowledgement Response ---
                                             protocol::PrivateResponse::Ack => {
-                                                // let _ = swarm_tx.send(AppEvent::LogMessage(format!("[Swarm] Received Ack for request {:?} from {}", request_id, peer)));
+                                                // Acknowledge responses are typically for confirming receipt of messages like Offer, Decline, Accept, ChatMessage.
+                                                // Usually no specific action needed here other than potentially logging.
                                             }
-                                            // --- Handle incoming file chunks ---
+                                            // --- Handle Incoming File Chunk Response ---
                                             protocol::PrivateResponse::FileChunk { filename, chunk_index, data, is_last } => {
-                                                // Look up DownloadState.
-                                                // Write data to file.
-                                                // Update progress.
-                                                // Request next chunk or finalize.
-                                                // Get the mutable state for this peer's downloads
+                                                // Find the download state for this peer and filename
                                                 if let Some(peer_downloads) = incoming_transfers_state.get_mut(&peer) {
-                                                    // Get the mutable state for the specific file download
                                                     if let Some(state) = peer_downloads.get_mut(&filename) {
-                                                        // Verify chunk index
+                                                        // Verify if the received chunk is the expected one
                                                         if chunk_index != state.next_chunk {
                                                             let _ = swarm_tx.send(AppEvent::LogMessage(format!(
                                                                 "[Swarm Task] Error: Received out-of-order chunk for '{}' from {}. Expected {}, Got {}. Ignoring.",
                                                                 filename, peer, state.next_chunk, chunk_index
                                                             )));
-                                                            // Optional: Send TransferError back?
+                                                            // Consider sending a TransferError back or re-requesting the correct chunk
                                                             return; // Stop processing this chunk
                                                         }
 
-                                                        // Write data to file
+                                                        // Write the received data chunk to the temporary file
                                                         match state.file.write_all(&data).await {
                                                             Ok(_) => {
-                                                                // Update state
+                                                                // Update the download state (bytes received, next expected chunk)
                                                                 let bytes_written = data.len() as u64;
                                                                 let previous_progress_marker = state.received / crate::constants::PROGRESS_UPDATE_BYTES;
                                                                 state.received += bytes_written;
                                                                 state.next_chunk += 1;
                                                                 let current_progress_marker = state.received / crate::constants::PROGRESS_UPDATE_BYTES;
 
-                                                                // Send progress update if threshold crossed
+                                                                // Send progress update to UI if a threshold is crossed or if it's the last chunk
                                                                 if current_progress_marker > previous_progress_marker || is_last {
                                                                      if let Err(e) = swarm_tx.send(AppEvent::FileTransferProgress {
                                                                         peer_id: peer,
@@ -544,10 +506,10 @@ pub async fn run_swarm_loop(
                                                                     }
                                                                 }
 
-                                                                // Request next or finalize
+                                                                // Handle completion or request the next chunk
                                                                 if is_last {
-                                                                    // Final chunk received
-                                                                    // Flush and sync file
+                                                                    // --- Finalize Download ---
+                                                                    // Flush and sync the file ensure data is written to disk
                                                                     if let Err(e) = state.file.flush().await {
                                                                          let _ = swarm_tx.send(AppEvent::LogMessage(format!("[Swarm Task] Error flushing file '{}': {}", state.local_path.display(), e)));
                                                                     }
@@ -555,14 +517,16 @@ pub async fn run_swarm_loop(
                                                                         let _ = swarm_tx.send(AppEvent::LogMessage(format!("[Swarm Task] Error syncing file '{}': {}", state.local_path.display(), e)));
                                                                     }
 
-                                                                    // Remove the state *before* rename/cleanup attempts
+                                                                    // Remove the download state (implicitly drops the file handle)
                                                                     let state_owned = peer_downloads.remove(&filename).expect("State should exist here");
 
-                                                                    // Construct final path with collision handling
-                                                                    let mut final_path = state_owned.local_path.clone(); // Use state_owned now
-                                                                    final_path.set_extension(""); // Remove .tmp extension conceptually
-                                                                    let original_final_path = final_path.clone(); // Keep original for potential renaming
+                                                                    // --- Rename Temporary File ---
+                                                                    // Construct final path and handle potential collisions
+                                                                    let mut final_path = state_owned.local_path.clone();
+                                                                    final_path.set_extension(""); // Remove .tmp conceptually
+                                                                    let original_final_path = final_path.clone();
 
+                                                                    // Add timestamp if filename collision occurs
                                                                     let mut counter = 0;
                                                                     while final_path.exists() {
                                                                         counter += 1;
@@ -576,7 +540,7 @@ pub async fn run_swarm_loop(
                                                                         if let Some(ext) = original_final_path.extension() {
                                                                             final_path.set_extension(ext);
                                                                         }
-                                                                        // Safety break after too many attempts (highly unlikely)
+                                                                        // Safety break to prevent infinite loops
                                                                         if counter > 10 {
                                                                             let _ = swarm_tx.send(AppEvent::LogMessage(format!("[Swarm Task] Error: Could not find unique filename for '{}' after {} attempts. Aborting rename.", original_final_path.display(), counter)));
                                                                             let fail_event = AppEvent::FileTransferFailed {
@@ -584,34 +548,35 @@ pub async fn run_swarm_loop(
                                                                                  filename: filename.clone(),
                                                                                  error: "Failed to create unique final filename".to_string(),
                                                                              };
-                                                                             let _ = swarm_tx.send(fail_event);
+                                                                            let _ = swarm_tx.send(fail_event);
                                                                             // Attempt cleanup of temp file
-                                                                            let _ = tokio::fs::remove_file(&state_owned.local_path).await; // Use state_owned
-                                                                            return;
+                                                                            let _ = tokio::fs::remove_file(&state_owned.local_path).await;
+                                                                            return; // Stop processing
                                                                         }
                                                                     }
 
-                                                                    // Rename temp file to final path
-                                                                    match tokio::fs::rename(&state_owned.local_path, &final_path).await { // Use state_owned
+                                                                    // Perform the rename from .tmp to final name
+                                                                    match tokio::fs::rename(&state_owned.local_path, &final_path).await {
                                                                         Ok(_) => {
-                                                                            // Send completion event to UI
+                                                                            // --- Download Successful ---
+                                                                            // Notify UI of completion, including the final path and size
                                                                              let success_event = AppEvent::FileTransferComplete {
                                                                                 peer_id: peer,
                                                                                 filename: filename.clone(),
-                                                                                path: final_path.clone(), // Send final path to UI
-                                                                                total_size: state_owned.total_size, // <<< Include total size
+                                                                                path: final_path.clone(),
+                                                                                total_size: state_owned.total_size,
                                                                             };
                                                                             if let Err(e) = swarm_tx.send(success_event) {
                                                                                 let _ = swarm_tx.send(AppEvent::LogMessage(format!("[Swarm] Error sending completion event to UI: {}", e)));
                                                                             }
                                                                         }
                                                                         Err(e) => {
-                                                                            // Failed to rename file
+                                                                            // --- Download Failed (Rename Error) ---
                                                                             let _ = swarm_tx.send(AppEvent::LogMessage(format!(
                                                                                 "[Swarm Task] Error renaming temp file '{}' to '{}': {}. Download failed.",
-                                                                                state_owned.local_path.display(), final_path.display(), e // Use state_owned
+                                                                                state_owned.local_path.display(), final_path.display(), e
                                                                             )));
-                                                                            // Send failure event to UI
+                                                                            // Notify UI of failure
                                                                             let fail_event = AppEvent::FileTransferFailed {
                                                                                  peer_id: peer,
                                                                                  filename: filename.clone(),
@@ -619,11 +584,12 @@ pub async fn run_swarm_loop(
                                                                              };
                                                                             let _ = swarm_tx.send(fail_event);
                                                                              // Attempt cleanup of temp file
-                                                                            let _ = tokio::fs::remove_file(&state_owned.local_path).await; // Use state_owned
+                                                                            let _ = tokio::fs::remove_file(&state_owned.local_path).await;
                                                                         }
                                                                     }
                                                                 } else {
-                                                                    // Not the last chunk, request the next one
+                                                                    // --- Request Next Chunk ---
+                                                                    // Not the last chunk, send a request for the next one
                                                                     let chunk_request = protocol::PrivateRequest::RequestChunk {
                                                                         filename: filename.clone(),
                                                                         chunk_index: state.next_chunk
@@ -632,12 +598,12 @@ pub async fn run_swarm_loop(
                                                                 }
                                                             }
                                                             Err(e) => {
-                                                                // Failed to write chunk to file
+                                                                // --- Download Failed (Write Error) ---
                                                                 let _ = swarm_tx.send(AppEvent::LogMessage(format!(
                                                                     "[Swarm Task] Error writing chunk {} for file '{}' to '{}': {}. Download failed.",
                                                                     chunk_index, filename, state.local_path.display(), e
                                                                 )));
-                                                                // Send failure event to UI
+                                                                // Notify UI of failure
                                                                  let fail_event = AppEvent::FileTransferFailed {
                                                                      peer_id: peer,
                                                                      filename: filename.clone(),
@@ -648,49 +614,53 @@ pub async fn run_swarm_loop(
                                                                 // Remove state to allow file handle to drop before attempting removal
                                                                 let state_owned_err = peer_downloads.remove(&filename).expect("State should exist here on write error");
                                                                 // Attempt cleanup of temp file
-                                                                let _ = tokio::fs::remove_file(&state_owned_err.local_path).await; // Use state_owned_err
+                                                                let _ = tokio::fs::remove_file(&state_owned_err.local_path).await;
                                                             }
                                                         }
                                                     } else {
-                                                        // No download state found for this filename
+                                                        // Received a chunk for a download we don't have state for (filename mismatch)
                                                         let _ = swarm_tx.send(AppEvent::LogMessage(format!(
                                                             "[Swarm Task] Received FileChunk for unknown download '{}' from {}. Ignoring.",
                                                             filename, peer
                                                         )));
                                                     }
                                                 } else {
-                                                    // No download state found for this peer
+                                                    // Received a chunk from a peer we don't have any active downloads with
                                                     let _ = swarm_tx.send(AppEvent::LogMessage(format!(
                                                         "[Swarm Task] Received FileChunk for unknown peer {} (File '{}'). Ignoring.",
                                                         peer, filename
                                                     )));
                                                 }
                                             }
-                                            // --- Handle transfer errors ---
+                                            // --- Handle Transfer Error Response ---
                                             protocol::PrivateResponse::TransferError { filename, error } => {
+                                                // The remote peer reported an error during the transfer
                                                 let _ = swarm_tx.send(AppEvent::LogMessage(format!(
                                                     "[Swarm Task] Received TransferError from {} for file '{}': {}",
                                                     peer, filename, error
                                                 )));
-                                                // Attempt to find and clean up the download state
+                                                // --- Clean up Failed Download ---
+                                                // Attempt to find and remove the download state
                                                 if let Some(peer_downloads) = incoming_transfers_state.get_mut(&peer) {
                                                     if let Some(state_owned) = peer_downloads.remove(&filename) {
-                                                         // Send failure event to UI
+                                                         // Notify UI of failure
                                                         let fail_event = AppEvent::FileTransferFailed {
                                                             peer_id: peer,
                                                             filename: filename.clone(),
                                                             error: format!("Transfer failed on sender side: {}", error),
                                                         };
                                                         let _ = swarm_tx.send(fail_event);
-                                                        // Attempt cleanup of temp file
+                                                        // Attempt cleanup of the partial temp file
                                                         let _ = tokio::fs::remove_file(&state_owned.local_path).await;
                                                     } else {
+                                                        // Error received for a download we didn't know about (filename)
                                                          let _ = swarm_tx.send(AppEvent::LogMessage(format!(
                                                             "[Swarm Task] Received TransferError for unknown download '{}' from {}. No cleanup needed.",
                                                             filename, peer
                                                         )));
                                                     }
                                                 } else {
+                                                     // Error received for a peer we didn't know about
                                                      let _ = swarm_tx.send(AppEvent::LogMessage(format!(
                                                         "[Swarm Task] Received TransferError for unknown peer {} (File '{}'). No cleanup needed.",
                                                         peer, filename
@@ -698,60 +668,49 @@ pub async fn run_swarm_loop(
                                                 }
                                             }
                                         }
-                                        // Avoid request_id unused warning
+                                        // Prevent unused variable warning for request_id
                                         let _ = request_id;
                                     }
                                 }
+                                // --- Outbound Request Failure ---
                                 RequestResponseEvent::OutboundFailure { peer, request_id, error, .. } => {
-                                    // Explicitly log outbound failures for RequestResponse
+                                    // Log failures when sending requests (e.g., network issues, peer disconnected)
                                     let _ = swarm_tx.send(AppEvent::LogMessage(format!("[Swarm Task] Outbound RequestResponse Failure to {}: ReqID {:?}, Error: {}", peer, request_id, error)));
+                                    // TODO: Potentially map request_id back to transfer state and trigger failure cleanup
                                 }
+                                // --- Inbound Request Failure ---
                                 RequestResponseEvent::InboundFailure { peer, request_id, error, .. } => {
+                                    // Log failures processing incoming requests (e.g., deserialization error on our side)
                                     let _ = swarm_tx.send(AppEvent::LogMessage(format!("[Swarm] Inbound RequestResponse failure from {}: Request {:?}, Error: {}", peer, request_id, error)));
                                 }
+                                // --- Response Sent Confirmation ---
                                 RequestResponseEvent::ResponseSent { peer, request_id, .. } => {
-                                    // Optional: Log when response is successfully sent
-                                    // let _ = swarm_tx.send(AppEvent::LogMessage(format!("[Swarm] Sent response for request {:?} to {}", request_id, peer)));
-
+                                    // Optional: Log confirmation that a response was successfully sent
+                                    // Usually not needed unless debugging specific request/response flows
                                     let _ = peer;
                                     let _ = request_id;
                                 }
                             }
                         }
-                        // Forward other behaviour events (like Ping) generically
+                        // --- Forward Other Behaviour Events ---
+                        // Handle other behaviour events not specifically matched above (e.g., Ping)
                         SwarmEvent::Behaviour(other_behaviour_event) => {
-                            // Check if it's NOT a Gossipsub or RequestResponse event before forwarding generically
+                            // Avoid forwarding Gossipsub or RequestResponse events again if they fall through
                             if !matches!(other_behaviour_event, SwapBytesBehaviourEvent::Gossipsub(_) | SwapBytesBehaviourEvent::RequestResponse(_)) {
+                                 // Forward the generic behaviour event to the UI/main task
                                  let _ = swarm_tx.send(AppEvent::Swarm(SwarmEvent::Behaviour(other_behaviour_event)));
-                            } else {
-                                // Log ignored Gossipsub/ReqRes events
-                                // let _ = swarm_tx.send(AppEvent::LogMessage(format!("[Swarm] Ignored specific Gossipsub/ReqRes event: {:?}", other_behaviour_event)));
                             }
                         }
-                        // Forward non-behaviour swarm events (like NewListenAddr, ConnectionEstablished, etc.)
+                        // --- Forward Non-Behaviour Swarm Events ---
+                        // Handle core Swarm events (Connections, Listen Addresses, etc.)
                         other_swarm_event => {
-                            // Log specific connection events
-                            // match &other_swarm_event {
-                            //     SwarmEvent::ConnectionEstablished { peer_id, endpoint, .. } => {
-                            //         let _ = swarm_tx.send(AppEvent::LogMessage(format!("[Swarm] ConnectionEstablished: {} ({:?})", peer_id, endpoint.get_remote_address())));
-                            //     },
-                            //     SwarmEvent::ConnectionClosed { peer_id, cause, .. } => {
-                            //         let _ = swarm_tx.send(AppEvent::LogMessage(format!("[Swarm] ConnectionClosed: {} (Cause: {:?})", peer_id, cause)));
-                            //     },
-                            //     SwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {
-                            //         let _ = swarm_tx.send(AppEvent::LogMessage(format!("[Swarm] OutgoingConnectionError: {:?} ({})", peer_id, error)));
-                            //     },
-                            //     SwarmEvent::IncomingConnectionError { error, local_addr, send_back_addr, .. } => {
-                            //         let _ = swarm_tx.send(AppEvent::LogMessage(format!("[Swarm] IncomingConnectionError: {} (Local: {:?}, Remote: {:?})", error, local_addr, send_back_addr)));
-                            //     },
-                            //     _ => {} // Ignore others for now
-                            // }
-
+                            // Forward the generic Swarm event to the UI/main task
                             let _ = swarm_tx.send(AppEvent::Swarm(other_swarm_event));
                         }
                     }
                 } else {
-                    break; // Swarm stream ended
+                    // The swarm event stream has ended, break the loop
+                    break;
                 }
             }
         }

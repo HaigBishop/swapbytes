@@ -3,8 +3,7 @@ Main entry point for the SwapBytes application.
 */
 
 // --- Standard Library Imports ---
-use std::{error::Error, time::Duration, time::Instant, time::SystemTime, time::UNIX_EPOCH};
-use std::path::PathBuf;
+use std::{error::Error, time::Duration, time::Instant};
 
 // --- Async and Tokio Imports ---
 use tokio::sync::mpsc;
@@ -12,11 +11,10 @@ use tokio_util::sync::CancellationToken;
 use tokio::time::interval;
 
 // --- libp2p Imports ---
-use libp2p::{noise, ping, swarm::SwarmEvent, tcp, yamux, identity, PeerId, gossipsub};
+use libp2p::{noise, tcp, yamux, identity, PeerId, gossipsub};
 
 // --- Terminal UI Imports ---
 use crossterm::event;
-use crossterm::event::{KeyCode, KeyEventKind};
 use ratatui::{
     layout::{Constraint, Layout, Position},
     widgets::Block,
@@ -30,45 +28,49 @@ mod commands;
 mod behavior;
 mod protocol;
 mod constants;
-use tui::{App, AppEvent, InputMode, FocusPane, layout_chunks, PeerInfo, OnlineStatus};
-use behavior::{SwapBytesBehaviour, SwapBytesBehaviourEvent};
+mod input_handler;
+mod event_handler;
+use tui::{App, AppEvent, InputMode, layout_chunks, OnlineStatus};
+use behavior::SwapBytesBehaviour;
 
 
-// --- Message Types ---
-
-/// Entry point: sets up TUI, libp2p, and event loop.
+// --- Application Entry Point ---
+/// Sets up the terminal UI, libp2p swarm, and the main application event loop.
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
 
     // --- Initialize App State ---
+    // Creates the central state structure for the application.
     let mut app = App::default();
 
-    // --- Terminal UI setup ---
+    // --- Terminal UI Setup ---
+    // Initializes the terminal interface using ratatui.
     let mut terminal = ratatui::init();
 
 
-    // --- Generate Identity ---
+    // --- Generate Local Peer Identity ---
+    // Creates a unique cryptographic keypair for this node.
     let local_key = identity::Keypair::generate_ed25519();
     let local_peer_id = PeerId::from(local_key.public());
 
-    // --- Event channel and cancellation token ---
-    // Used to communicate between background tasks and the UI loop.
-    let (tx, mut rx) = mpsc::unbounded_channel::<AppEvent>(); // Specify type
+    // --- Communication Channels ---
+    // Channel for events from background tasks (Swarm, Keyboard) to the UI loop.
+    let (tx, mut rx) = mpsc::unbounded_channel::<AppEvent>();
+    // Token to signal cancellation to background tasks.
     let cancel = CancellationToken::new();
-
-    // Channel for commands from UI loop to Swarm task
+    // Channel for commands from the UI loop to the Swarm task.
     let (cmd_tx, cmd_rx) = mpsc::unbounded_channel::<AppEvent>();
 
 
-    // --- libp2p Swarm setup ---
-    // 1. Create our custom behaviour with the generated key.
+    // --- libp2p Swarm Setup ---
+    // 1. Create the custom Swarm behaviour using the generated key.
     let mut behaviour = SwapBytesBehaviour::new(&local_key)?;
 
-    // 2. Define the gossipsub topic and subscribe.
+    // 2. Define the Gossipsub topic for chat messages and subscribe to it.
     let topic = gossipsub::IdentTopic::new(constants::SWAPBYTES_TOPIC);
     behaviour.gossipsub.subscribe(&topic)?;
 
-    // 3. Build the Swarm using the existing identity and the behaviour.
+    // 3. Build the libp2p Swarm, configuring transport (TCP, Noise, Yamux) and behaviour.
     let mut swarm = libp2p::SwarmBuilder::with_existing_identity(local_key)
         .with_tokio()
         .with_tcp(
@@ -76,25 +78,23 @@ async fn main() -> Result<(), Box<dyn Error>> {
             noise::Config::new,
             yamux::Config::default,
         )?
-        .with_behaviour(|_| behaviour)? // Pass the constructed behaviour
+        .with_behaviour(|_| behaviour)?
         .build();
 
-    // Listen on all interfaces, random OS-assigned port.
+    // Listen for incoming connections on all network interfaces using a random OS-assigned port.
     swarm.listen_on("/ip4/0.0.0.0/tcp/0".parse()?)?;
 
 
-    // --- Background task: forward swarm events to UI ----
-    let swarm_tx = tx.clone(); // For Swarm->UI events
+    // --- Spawn Swarm Task ---
+    // Clone necessary variables for the swarm task.
+    let swarm_tx = tx.clone();
     let swarm_cancel = cancel.clone();
-    // Capture initial nickname for the swarm task
-    let initial_nickname = app.nickname.clone();
-    // Capture initial visibility state
+    let initial_nickname = app.nickname.clone(); // Pass initial state to the task
     let initial_visibility = app.is_visible;
 
-    
-    // --- Handle libp2p Swarm events ---
-    // Spawn the dedicated task that handles all libp2p Swarm events and logic.
-    // The implementation is in the `swarm_task` module.
+    // Spawn a dedicated asynchronous task to manage the libp2p Swarm.
+    // This task handles network events, peer discovery, and message propagation.
+    // See `swarm_task::run_swarm_loop` for implementation details.
     tokio::spawn(swarm_task::run_swarm_loop(
         swarm,
         swarm_tx,
@@ -105,18 +105,22 @@ async fn main() -> Result<(), Box<dyn Error>> {
     ));
 
 
-    // --- Background task: handle keyboard input ---
-    let kb_tx = tx.clone(); // Clone tx for the keyboard task -> UI
+    // --- Spawn Keyboard Input Task ---
+    // Clone necessary variables for the keyboard input task.
+    let kb_tx = tx.clone();
     let kb_cancel = cancel.clone();
+    // Spawn a dedicated asynchronous task to listen for keyboard events.
     tokio::spawn(async move {
         loop {
+            // Check for cancellation signal.
             if kb_cancel.is_cancelled() { break; }
-            // Poll for key events every 150ms (non-blocking)
+            // Poll for keyboard events with a short timeout to avoid blocking.
             if event::poll(Duration::from_millis(150)).unwrap() {
+                // If a key event occurs, read it and send it to the main UI loop via the channel.
                 if let event::Event::Key(key) = event::read().unwrap() {
-                    // Use kb_tx here
                     if kb_tx.send(AppEvent::Input(key)).is_err() {
-                        break; // UI gone
+                        // Stop the task if the channel is closed.
+                        break;
                     }
                 }
             }
@@ -124,1062 +128,159 @@ async fn main() -> Result<(), Box<dyn Error>> {
     });
 
 
-    // --- Application state and main event loop ---
+    // --- Initialize Application State & Start Main Loop ---
+    // Set the local peer ID in the application state.
     app.local_peer_id = Some(local_peer_id);
+    // Add initial messages to the console log.
     app.push("Welcome to SwapBytes!".to_string());
     app.push("Run /help to get started.".to_string());
-    let mut redraw = true; // Force initial draw
+    // Flag to indicate whether the UI needs to be redrawn.
+    let mut redraw = true;
 
-    // Timer for checking peer staleness in the UI task
-    let mut check_peers_interval = interval(Duration::from_secs(5)); // Check every 5s
+    // --- Peer Staleness Check Timer ---
+    // Set up a timer to periodically check for inactive peers.
+    let mut check_peers_interval = interval(Duration::from_secs(5));
 
+    // --- Main Event Loop ---
     loop {
         // --- Check Ping Timeout ---
-        // Must be done *before* drawing or selecting
+        // This check must happen before drawing or event processing.
         if app.pinging {
             if let Some(start_time) = app.ping_start_time {
-                // Use the constant from the tui module
+                // Check if the ping duration has exceeded the timeout.
                 if start_time.elapsed() > constants::PINGING_DURATION {
                     app.pinging = false;
                     app.ping_start_time = None;
-                    // Don't log timeout here, let ping result handle success/failure message
-                    redraw = true; // Need redraw to update input title
+                    // The ping result itself will log success/failure.
+                    redraw = true;
                 }
             } else {
-                // Should not happen if pinging is true, reset defensively
+                // Reset state defensively if ping_start_time is None while pinging is true.
                 app.pinging = false;
                 redraw = true;
             }
         }
 
-        // Redraw UI only if something changed
+        // --- UI Rendering ---
+        // Redraw the terminal UI only if the state has changed.
         if redraw {
             terminal.draw(|f| {
-                // --- Draw main application widget ---
-                // We draw the app first using its Widget impl
-               // This draws everything EXCEPT the stateful scrollbar
+                // Draw the main application widget, which handles most UI elements.
+                // Note: The `App` struct implements the `ratatui::widgets::Widget` trait.
                 f.render_widget(&app, f.area());
 
-                // Calculate layout areas using layout_chunks helper
+                // --- Layout Calculation ---
+                // Divide the terminal area into sections for chat, console, and users.
                 let (chat_area, console_area, _users_area) = layout_chunks(f.area());
 
-                // --- Calculate Console Log Area for scrollbar ---
-                let console_block = Block::bordered(); // Temporary block for inner area calc
+                // --- Console Area Calculation ---
+                // Calculate the inner area of the console block, excluding borders.
+                let console_block = Block::bordered();
                 let console_inner_area = console_block.inner(console_area);
+                // Divide the console area into log display and command input sections.
                 let console_chunks = Layout::vertical([
-                    Constraint::Min(1),      // Log area
-                    Constraint::Length(3), // Command input area
+                    Constraint::Min(1),      // Area for displaying logs.
+                    Constraint::Length(3), // Area for command input.
                 ]).split(console_inner_area);
                 let log_area = console_chunks[0];
 
-                // --- Render Console Scrollbar ---
-                // Update scrollbar state stored in app (ensure content len & viewport are correct)
+                // Update the console viewport height in the app state for scrollbar calculation.
                 app.console_viewport_height = log_area.height as usize;
 
-                // --- Calculate Chat Message Area and Update Viewport Height ---
-                let chat_block = Block::bordered(); // Temporary block for inner area calc
+                // --- Chat Area Calculation ---
+                // Calculate the inner area of the chat block, excluding borders.
+                let chat_block = Block::bordered();
                 let chat_inner_area = chat_block.inner(chat_area);
+                 // Divide the chat area into message display and chat input sections.
                 let chat_chunks_for_height = Layout::vertical([
-                    Constraint::Min(1),      // Messages area
-                    Constraint::Length(3), // Chat input area
+                    Constraint::Min(1),      // Area for displaying chat messages.
+                    Constraint::Length(3), // Area for chat input.
                 ]).split(chat_inner_area);
                 let messages_area = chat_chunks_for_height[0];
+                // Update the chat viewport height in the app state.
                 app.chat_viewport_height = messages_area.height as usize;
 
-                // --- Set cursor position (only in Command mode) ---
+                // --- Cursor Positioning ---
+                // Set the terminal cursor position based on the current input mode.
                 match app.input_mode {
-                    InputMode::Normal => {} // Cursor hidden by default
+                    InputMode::Normal => {} // Cursor is hidden in Normal mode.
                     InputMode::Command => {
-                        // Command Input area is the second chunk of the console layout
+                        // Position cursor within the command input area.
                         let command_input_area = console_chunks[1];
                         f.set_cursor_position(Position::new(
-                            command_input_area.x + app.cursor_position as u16 + 1, // +1 for border
-                            command_input_area.y + 1, // +1 for border
+                            command_input_area.x + app.cursor_position as u16 + 1, // +1 for left border
+                            command_input_area.y + 1, // +1 for top border
                         ));
                     }
                     InputMode::Chat => {
-                        // --- Calculate Chat Input Area for cursor (re-use chat_chunks_for_height) ---
-                        // Note: We calculated chunks earlier to get messages_area height.
-                        // Re-using the calculation here avoids redundant code.
+                         // Position cursor within the chat input area.
                         let chat_input_area = chat_chunks_for_height[1];
-
-                        // Set cursor for chat input
                         f.set_cursor_position(Position::new(
-                            chat_input_area.x + app.chat_cursor_position as u16 + 1, // +1 for border
-                            chat_input_area.y + 1, // +1 for border
+                            chat_input_area.x + app.chat_cursor_position as u16 + 1, // +1 for left border
+                            chat_input_area.y + 1, // +1 for top border
                         ));
                     }
                 }
             })?;
+            // Reset the redraw flag after drawing.
             redraw = false;
         }
 
         // --- Event Handling ---
+        // Wait for events from different sources concurrently.
         tokio::select! {
-            // Handle events from Swarm or Keyboard tasks
+            // Handle events received from the Swarm or Keyboard tasks.
             maybe_ev = rx.recv() => {
                 if let Some(ev) = maybe_ev {
-                    match ev {
-                        AppEvent::Swarm(se) => {
-                            // Only handle events forwarded from the swarm task here
-                            match se { // No need for `&se` anymore as we own it
-                                SwarmEvent::NewListenAddr { address, .. } => {
-                                    // Store the address
-                                    app.listening_addresses.push(address.clone());
-                                    // app.push(format!("Listening on {address}"));
-                                }
-                                SwarmEvent::Behaviour(
-                                    SwapBytesBehaviourEvent::Ping(ping::Event { peer, result, .. })
-                                ) => {
-                                    match result {
-                                        Ok(latency) => {
-                                            // Only log if we initiated the ping
-                                            if app.pinging {
-                                                app.push(format!("Successfully pinged peer: {peer} ({latency:?})"));
-                                                // No need to reset pinging here, the timer handles it
-                                            }
-                                        }
-                                        Err(e) => {
-                                            // Only log if we initiated the ping
-                                            if app.pinging {
-                                                app.push(format!("Ping failed for peer: {peer} ({e:?})"));
-                                                // No need to reset pinging here, the timer handles it
-                                            }
-                                        }
-                                    }
-                                    // Ping activity (even incoming pings, or failed outgoing ones)
-                                    // should still update the peer's last seen time.
-                                    if let Some(peer_info) = app.peers.get_mut(&peer) {
-                                        peer_info.last_seen = Instant::now();
-                                        peer_info.status = OnlineStatus::Online; // Mark online on successful ping
-                                    }
-                                }
-                                // Mdns events are handled in the swarm task now
-                                // SwarmEvent::Behaviour(SwapBytesBehaviourEvent::Mdns(...)) => { ... }
+                    // Delegate event processing to the `handle_app_event` function.
+                    let needs_redraw = event_handler::handle_app_event(&mut app, &cmd_tx, ev);
+                    // Mark UI for redraw if the handler indicates changes.
+                    redraw = redraw || needs_redraw;
 
-                                // --- Handle forwarded Gossipsub Messages to update last_seen ---
-                                // This ensures peers stay online if they are forwarding messages (e.g., heartbeats)
-                                // It also re-adds peers to the list if they were forgotten.
-                                SwarmEvent::Behaviour(SwapBytesBehaviourEvent::Gossipsub(gossipsub::Event::Message {
-                                    propagation_source: peer_id, // The peer who forwarded the message
-                                    .. // Ignore other fields here, we just need the source
-                                })) => {
-                                    // Use entry API to insert if not present or update if present
-                                    let now = Instant::now();
-                                    let peer_info = app.peers.entry(peer_id).or_insert_with(|| PeerInfo {
-                                        nickname: None, // Nickname might be updated separately via NicknameUpdated event
-                                        status: OnlineStatus::Online, // Assume online if we got a message
-                                        last_seen: now,
-                                    });
-                                    // Update existing entry's status and last_seen
-                                    peer_info.last_seen = now;
-                                    peer_info.status = OnlineStatus::Online; // Mark online on any message received
-                                    // If the peer is not in the map yet, PeerDiscovered or NicknameUpdated will handle adding them.
-                                }
-
-                                SwarmEvent::OutgoingConnectionError { error, .. } => {
-                                    // Log in UI task as well
-                                    // app.push(format!("[UI] Outgoing connection error: {error}"));
-                                    let _ = error;
-                                }
-                                // Add logging for ConnectionEstablished and ConnectionClosed here
-                                SwarmEvent::ConnectionEstablished { peer_id, endpoint, num_established, .. } => {
-                                    // app.push(format!("[UI] Connection Established with: {} ({}) (Total: {})", peer_id, endpoint.get_remote_address(), num_established));
-                                    // Mark peer as online immediately on connection
-                                     if let Some(peer_info) = app.peers.get_mut(&peer_id) {
-                                        peer_info.status = OnlineStatus::Online;
-                                        peer_info.last_seen = Instant::now(); // Also update last_seen
-                                    }
-
-                                    // Avoid unused variable warning
-                                    let _ = endpoint;
-                                    let _ = num_established;
-                                }
-                                SwarmEvent::ConnectionClosed { peer_id, cause, num_established, .. } => {
-                                    // app.push(format!("[UI] Connection Closed with: {} (Cause: {:?}) (Remaining: {})", peer_id, cause, num_established));
-                                    // Optionally mark as offline immediately on closure, depending on the cause
-                                    // if cause.is_some() { // Only mark offline if there was an error? Or always? Let's mark always for now.
-                                    //     if let Some(peer_info) = app.peers.get_mut(&peer_id) {
-                                    //         peer_info.status = OnlineStatus::Offline;
-                                    //     }
-                                    // }
-                                    // Avoid unused variable warning
-                                    let _ = peer_id;
-                                    let _ = cause;
-                                    let _ = num_established;
-                                }
-                                // Add other SwarmEvent variants as needed
-                                _ => {
-                                    // app.push(format!("Unhandled Swarm Event: {:?}", se));
-                                }
-                            }
-                            redraw = true; // Redraw after any swarm event
-                        }
-                        AppEvent::Input(key) => {
-                            // Handle Ctrl+q globally to quit
-                            if key.kind == KeyEventKind::Press
-                                && key.code == KeyCode::Char('q')
-                                && key.modifiers.contains(event::KeyModifiers::CONTROL)
-                            {
-                                cancel.cancel();
-                                app.exit = true;
-                                continue; // Skip further processing for this event
-                            }
-
-                            // Handle based on input mode
-                            match app.input_mode {
-                                InputMode::Normal => { // Normal mode: focus switching, command/chat entry
-                                    if key.kind == KeyEventKind::Press {
-                                        match key.code {
-                                            // Focus Switching
-                                            // (if user hits Tab)
-                                            KeyCode::Tab => {
-                                                app.focused_pane = match app.focused_pane {
-                                                    FocusPane::Console => FocusPane::UsersList, // Console -> Users
-                                                    FocusPane::UsersList => FocusPane::Chat,
-                                                    FocusPane::Chat => FocusPane::Console, // Chat -> Console
-                                                };
-                                                redraw = true;
-                                            }
-                                            // Enter Command Mode (if user hits /) - Removed focus check
-                                            KeyCode::Char('/') => {
-                                                app.focused_pane = FocusPane::Console; // Ensure console is focused
-                                                app.input_mode = InputMode::Command;
-                                                app.input.clear();
-                                                app.input.push('/');
-                                                app.cursor_position = 1;
-                                                redraw = true;
-                                            }
-                                            // Console Scrolling (Up/Down)
-                                            KeyCode::Up if app.focused_pane == FocusPane::Console => {
-                                                app.console_scroll = app.console_scroll.saturating_sub(1);
-                                                redraw = true;
-                                            }
-                                            KeyCode::Down if app.focused_pane == FocusPane::Console => {
-                                                let max_scroll = app.log.len().saturating_sub(app.console_viewport_height);
-                                                app.console_scroll = app.console_scroll.saturating_add(1).min(max_scroll);
-                                                redraw = true;
-                                            }
-                                            // Chat Scrolling (Up/Down)
-                                            KeyCode::Up if app.focused_pane == FocusPane::Chat => {
-                                                app.chat_scroll = app.chat_scroll.saturating_sub(1);
-                                                redraw = true;
-                                            }
-                                            KeyCode::Down if app.focused_pane == FocusPane::Chat => {
-                                                // Calculate max_scroll based on chat history and viewport
-                                                let max_scroll = app.global_chat_history.len().saturating_sub(app.chat_viewport_height);
-                                                app.chat_scroll = app.chat_scroll.saturating_add(1).min(max_scroll);
-                                                redraw = true;
-                                            }
-                                            // Enter Chat Mode (if any char pressed and Chat focused)
-                                            // Exclude Tab and potentially other control keys if needed
-                                            KeyCode::Char(c) if app.focused_pane == FocusPane::Chat => {
-                                                app.input_mode = InputMode::Chat;
-                                                app.chat_input.clear();
-                                                app.reset_chat_cursor();
-                                                app.enter_chat_char(c);
-                                                redraw = true;
-                                            }
-                                            _ => {} // Ignore other keys in normal mode
-                                        }
-                                    }
-                                }
-                                InputMode::Command => { // Command mode: handle command input
-                                    if key.kind == KeyEventKind::Press {
-                                        match key.code {
-                                            KeyCode::Enter => {
-                                                // submit_command now returns an optional event
-                                                if let Some(event) = app.submit_command() {
-                                                    match event {
-                                                        AppEvent::Quit => {
-                                                            // Handle Quit directly here
-                                                            cancel.cancel();
-                                                            app.exit = true;
-                                                        }
-                                                        // Send other commands (like Dial) to the swarm task
-                                                        AppEvent::Dial(addr) => {
-                                                            let _ = cmd_tx.send(AppEvent::Dial(addr));
-                                                        }
-                                                        // Send NicknameUpdated event to the swarm task
-                                                        AppEvent::NicknameUpdated(peer_id, nickname) => {
-                                                            let _ = cmd_tx.send(AppEvent::NicknameUpdated(peer_id, nickname));
-                                                        }
-                                                        // Send VisibilityChanged event to the swarm task
-                                                        AppEvent::VisibilityChanged(is_visible) => {
-                                                            app.push(format!("Command sent visibility change: {}", is_visible));
-                                                            let _ = cmd_tx.send(AppEvent::VisibilityChanged(is_visible));
-                                                        }
-                                                        // Send SendFileOffer event to the swarm task
-                                                        AppEvent::SendFileOffer { target_peer, file_path } => {
-                                                            let _ = cmd_tx.send(AppEvent::SendFileOffer { target_peer, file_path });
-                                                        }
-                                                        // Send DeclineFileOffer event to the swarm task
-                                                        AppEvent::DeclineFileOffer { target_peer, filename } => {
-                                                            let _ = cmd_tx.send(AppEvent::DeclineFileOffer { target_peer, filename });
-                                                        }
-                                                        // Handle accepting file offers
-                                                        AppEvent::SendAcceptOffer { target_peer, filename, size_bytes } => {
-                                                            let _ = cmd_tx.send(AppEvent::SendAcceptOffer { target_peer, filename, size_bytes });
-                                                        }
-                                                        // Handle download directory changes
-                                                        AppEvent::DownloadDirChanged(new_dir) => {
-                                                            let _ = cmd_tx.send(AppEvent::DownloadDirChanged(new_dir));
-                                                        }
-                                                        // Handle registering outgoing transfers
-                                                        AppEvent::RegisterOutgoingTransfer { peer_id, filename, path } => {
-                                                            let _ = cmd_tx.send(AppEvent::RegisterOutgoingTransfer { peer_id, filename, path });
-                                                        }
-                                                        // Ignore any other event types potentially returned by submit_command
-                                                        _ => {}
-                                                    }
-                                                }
-                                                // Redraw only if we didn't just handle Quit
-                                                if !app.exit {
-                                                    redraw = true;
-                                                }
-                                            }
-                                            KeyCode::Char(to_insert) => {
-                                                app.enter_char(to_insert);
-                                                redraw = true;
-                                            }
-                                            KeyCode::Backspace => {
-                                                app.delete_char();
-                                                redraw = true;
-                                            }
-                                            KeyCode::Left => {
-                                                app.move_cursor_left();
-                                                redraw = true;
-                                            }
-                                            KeyCode::Right => {
-                                                app.move_cursor_right();
-                                                redraw = true;
-                                            }
-                                            // Add scrolling for Command mode
-                                            KeyCode::Up => {
-                                                app.console_scroll = app.console_scroll.saturating_sub(1);
-                                                redraw = true;
-                                            }
-                                            KeyCode::Down => {
-                                                let max_scroll = app.log.len().saturating_sub(app.console_viewport_height);
-                                                app.console_scroll = app.console_scroll.saturating_add(1).min(max_scroll);
-                                                redraw = true;
-                                            }
-                                            KeyCode::Esc => {
-                                                app.input_mode = InputMode::Normal;
-                                                app.input.clear();
-                                                app.reset_cursor();
-                                                redraw = true;
-                                            }
-                                            KeyCode::Tab => {
-                                                // Exit command mode, stay in console focus
-                                                app.input_mode = InputMode::Normal;
-                                                app.input.clear();
-                                                app.reset_cursor();
-                                                redraw = true;
-                                            }
-                                            _ => {} // Ignore other keys in Command mode
-                                        }
-                                    }
-                                }
-                                InputMode::Chat => { // Chat mode: handle chat input
-                                    if key.kind == KeyEventKind::Press {
-                                        match key.code {
-                                            KeyCode::Enter => {
-                                                // Only process if there's input and we are in global chat
-                                                if !app.chat_input.is_empty() && app.current_chat_context == tui::ChatContext::Global {
-                                                    let timestamp_ms = SystemTime::now()
-                                                        .duration_since(UNIX_EPOCH)
-                                                        .expect("Time went backwards")
-                                                        .as_millis() as u64;
-                                                    let nickname = app.nickname.clone();
-                                                    let local_peer_id = app.local_peer_id.expect("Local PeerID must be set");
-                                                    let content = app.chat_input.clone();
-
-                                                    // Create the network message
-                                                    let message = protocol::Message::GlobalChatMessage {
-                                                        content: content.clone(),
-                                                        timestamp_ms,
-                                                        nickname: nickname.clone(),
-                                                    };
-
-                                                    // Serialize the message for the network
-                                                    match serde_json::to_vec(&message) {
-                                                        Ok(data) => {
-                                                            // Send event to swarm task to publish
-                                                            if let Err(e) = cmd_tx.send(AppEvent::PublishGossipsub(data)) {
-                                                                app.push(format!("Error sending publish command: {}", e));
-                                                            }
-
-                                                            // Add the message to local history
-                                                            let local_chat_msg = tui::ChatMessage {
-                                                                sender_id: local_peer_id,
-                                                                sender_nickname: nickname,
-                                                                content,
-                                                                timestamp_ms,
-                                                            };
-                                                            app.global_chat_history.push(local_chat_msg);
-
-                                                            // Auto-scroll chat view IF already at the bottom
-                                                            let current_max_scroll = app.global_chat_history.len().saturating_sub(app.chat_viewport_height.max(1)).saturating_sub(1); // Max scroll before adding
-                                                            if app.chat_scroll >= current_max_scroll {
-                                                                let new_max_scroll = app.global_chat_history.len().saturating_sub(app.chat_viewport_height.max(1));
-                                                                app.chat_scroll = new_max_scroll;
-                                                            }
-                                                             // Otherwise, if user has scrolled up, don't force scroll down.
-
-                                                            // Reset input field and mode
-                                                            app.chat_input.clear();
-                                                            app.reset_chat_cursor();
-                                                            app.input_mode = InputMode::Normal;
-                                                            redraw = true;
-
-                                                        }
-                                                        Err(e) => {
-                                                            app.push(format!("Error serializing chat message: {}", e));
-                                                            // Optionally, don't clear input on serialization error
-                                                        }
-                                                    }
-                                                } else if !app.chat_input.is_empty() {
-                                                    // Handle Private Chat Context
-                                                    if let tui::ChatContext::Private { target_peer_id, .. } = app.current_chat_context {
-                                                        let message_content = app.chat_input.clone();
-
-                                                        // Send SendPrivateMessage event to swarm task
-                                                        if let Err(e) = cmd_tx.send(AppEvent::SendPrivateMessage {
-                                                            target_peer: target_peer_id,
-                                                            message: message_content.clone(), // Clone needed for potential local history
-                                                        }) {
-                                                            app.push(format!("Error sending private message command: {}", e));
-                                                        } else {
-                                                            // app.push(format!("Sending private message to {:?}...", target_peer_id));
-                                                            // Successfully sent event to swarm task, now add to local history
-                                                            let timestamp_ms = SystemTime::now()
-                                                                .duration_since(UNIX_EPOCH)
-                                                                .expect("Time went backwards")
-                                                                .as_millis() as u64;
-                                                            let local_peer_id = app.local_peer_id.expect("Local PeerID must be set");
-                                                            // Note: Use app.nickname (our own nickname) for sender_nickname here.
-                                                            let chat_msg = tui::ChatMessage {
-                                                                sender_id: local_peer_id,
-                                                                sender_nickname: app.nickname.clone(),
-                                                                content: message_content, // Use the cloned content
-                                                                timestamp_ms,
-                                                            };
-                                                            
-                                                            let history = app.private_chat_histories.entry(target_peer_id).or_default();
-                                                            let current_len = history.len(); // Length before adding
-                                                            history.push(tui::PrivateChatItem::Message(chat_msg));
-
-                                                            // Auto-scroll (since we are viewing this chat)
-                                                            let current_max_scroll = current_len.saturating_sub(app.chat_viewport_height.max(1));
-                                                            if app.chat_scroll >= current_max_scroll {
-                                                                let new_max_scroll = history.len().saturating_sub(app.chat_viewport_height.max(1));
-                                                                app.chat_scroll = new_max_scroll;
-                                                            }
-                                                        }
-
-                                                        // Clear input and return to normal mode (do this regardless of send success)
-                                                        app.chat_input.clear();
-                                                        app.reset_chat_cursor();
-                                                        app.input_mode = InputMode::Normal;
-                                                        redraw = true;
-
-                                                    } else {
-                                                        // Should not happen if context is not Global, but handle defensively
-                                                        app.push("Error: Cannot send message in unknown context.".to_string());
-                                                        app.input_mode = InputMode::Normal; // Reset mode
-                                                        redraw = true;
-                                                    }
-                                                } else {
-                                                    // Input is empty, just go back to normal mode
-                                                    app.input_mode = InputMode::Normal;
-                                                    redraw = true;
-                                                }
-                                            }
-                                            KeyCode::Char(to_insert) => {
-                                                app.enter_chat_char(to_insert);
-                                                redraw = true;
-                                            }
-                                            KeyCode::Backspace => {
-                                                app.delete_chat_char();
-                                                redraw = true;
-                                            }
-                                            KeyCode::Left => {
-                                                app.move_chat_cursor_left();
-                                                redraw = true;
-                                            }
-                                            KeyCode::Right => {
-                                                app.move_chat_cursor_right();
-                                                redraw = true;
-                                            }
-                                            // Add scrolling for Chat mode
-                                            KeyCode::Up => {
-                                                app.chat_scroll = app.chat_scroll.saturating_sub(1);
-                                                redraw = true;
-                                            }
-                                            KeyCode::Down => {
-                                                let max_scroll = app.global_chat_history.len().saturating_sub(app.chat_viewport_height);
-                                                app.chat_scroll = app.chat_scroll.saturating_add(1).min(max_scroll);
-                                                redraw = true;
-                                            }
-                                            KeyCode::Esc => {
-                                                // Exit chat mode without sending
-                                                app.input_mode = InputMode::Normal;
-                                                app.chat_input.clear();
-                                                app.reset_chat_cursor();
-                                                redraw = true;
-                                            }
-                                            KeyCode::Tab => {
-                                                // Exit chat mode, stay in chat focus
-                                                app.input_mode = InputMode::Normal;
-                                                app.chat_input.clear();
-                                                app.reset_chat_cursor();
-                                                redraw = true;
-                                            }
-                                            _ => {} // Ignore other keys in Chat mode
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        AppEvent::LogMessage(msg) => {
-                            app.push(msg);
-                            redraw = true;
-                        }
-                        AppEvent::PeerDiscovered(peer_id) => {
-                            if peer_id != app.local_peer_id.expect("Local peer ID should be set") { // Don't add self
-                                let now = Instant::now();
-                                let peer_info = app.peers.entry(peer_id).or_insert_with(|| PeerInfo {
-                                    nickname: None, // Nickname unknown initially
-                                    status: OnlineStatus::Online,
-                                    last_seen: now, // Set last_seen on discovery
-                                });
-                                // Modify the entry (whether newly inserted or existing)
-                                peer_info.last_seen = now;
-                                peer_info.status = OnlineStatus::Online;
-                                redraw = true;
-                            }
-                        }
-                        AppEvent::PeerExpired(peer_id) => {
-                            // We no longer rely on mDNS expiry for primary status
-                            // If we kept this, we would mark offline here, but heartbeat check is better
-                            // if let Some(peer_info) = app.peers.get_mut(&peer_id) {
-                            //     peer_info.status = OnlineStatus::Offline;
-                            // }
-                            // app.push(format!("mDNS Expired (ignored for status): {peer_id}"));
-                            let _ = peer_id; // Avoid unused variable warning
-                            // redraw = true; // Don't redraw if we ignore it
-                        }
-                        AppEvent::NicknameUpdated(peer_id, new_nickname) => {
-                            // Ignore updates for self
-                            if Some(peer_id) == app.local_peer_id {
-                                // We still need to update our own nickname in the swarm task if changed via command
-                                // but the UI state (app.nickname) is already updated by the command handler.
-                                // The swarm task gets a dedicated message for this.
-                            } else if let Some(peer_info) = app.peers.get_mut(&peer_id) {
-                                let old_nickname_opt = peer_info.nickname.clone(); // Clone old nickname option
-                                let new_nickname_opt = Some(new_nickname.clone()); // Wrap new nickname in Option
-
-                                // Check if the nickname actually changed and wasn't initially None
-                                let should_log = old_nickname_opt != new_nickname_opt && old_nickname_opt.is_some();
-
-                                // Always update the nickname in the peer info *before* logging
-                                peer_info.nickname = Some(new_nickname.clone()); // Update with cloned new nickname
-                                redraw = true;
-
-                                // Now log if necessary (app is no longer borrowed mutably by peer_info)
-                                if should_log {
-                                    let old_name = old_nickname_opt.unwrap_or_else(|| "Unknown".to_string()); // Should be Some due to check
-                                    let id_str = peer_id.to_base58();
-                                    let len = id_str.len();
-                                    let id_suffix = format!("(...{})", &id_str[len.saturating_sub(6)..]);
-                                    // Use the already updated nickname from the `new_nickname` variable
-                                    app.push(format!("Peer changed nickname: {} → {} {}", old_name, new_nickname, id_suffix));
-                                }
-
-                                // --- Update Chat Title if viewing private chat with this peer ---
-                                if let tui::ChatContext::Private { target_peer_id, target_nickname } = &mut app.current_chat_context {
-                                    if *target_peer_id == peer_id {
-                                        *target_nickname = Some(new_nickname.clone()); // Update the nickname in the context
-                                    }
-                                }
-
-                                // --- Update Private Chat History for this peer ---
-                                if let Some(history) = app.private_chat_histories.get_mut(&peer_id) {
-                                    for item in history.iter_mut() {
-                                        if let tui::PrivateChatItem::Message(message) = item {
-                                            // Only update messages sent *by* this peer
-                                            if message.sender_id == peer_id {
-                                                message.sender_nickname = Some(new_nickname.clone());
-                                            }
-                                        }
-                                    }
-                                }
-
-                                // --- Update Global Chat History for this peer ---
-                                for message in app.global_chat_history.iter_mut() {
-                                    // Only update messages sent *by* this peer
-                                    if message.sender_id == peer_id {
-                                        message.sender_nickname = Some(new_nickname.clone());
-                                    }
-                                }
-
-                            }
-                            // Optionally log if the peer wasn't found, but for now, just ignore it.
-                        }
-                        AppEvent::Dial(_) => {} // Handled by swarm task
-                        AppEvent::Quit => {} // Already handled in Command mode Enter
-                        AppEvent::VisibilityChanged(_) => {} // Handled by swarm task
-                        AppEvent::EnterChat(_msg) => {
-                            // Handle submitting a chat message
-                            // For now, just log it to the console
-                            // app.push(format!("[CHAT SUBMITTED] {}", msg));
-                            redraw = true;
-                        }
-                        AppEvent::GlobalMessageReceived { sender_id, sender_nickname, content, timestamp_ms } => {
-                            // app.log(format!("GlobalMessageReceived: {content} {timestamp_ms} from {sender_id}"));
-                            // Create the chat message struct
-                            let chat_msg = tui::ChatMessage {
-                                sender_id,
-                                sender_nickname: sender_nickname.clone(), // Clone nickname
-                                content,
-                                timestamp_ms,
-                            };
-                            // Log that we processed this specific event
-                            // app.log(format!("[UI] Processed GlobalMessage from {} ({})",
-                            //     sender_nickname.unwrap_or_else(|| format!("PeerID:{}", sender_id)),
-                            //     content));
-
-                            // Add to history
-                            app.global_chat_history.push(chat_msg);
-
-                            // --- Add notification if user is in a private chat ---
-                            if let tui::ChatContext::Private { .. } = app.current_chat_context {
-                                let sender_display_name = sender_nickname.clone().unwrap_or_else(|| {
-                                    let id_str = sender_id.to_base58();
-                                    let len = id_str.len();
-                                    format!("user(...{})", &id_str[len.saturating_sub(6)..])
-                                });
-                                app.push(format!("{} sent a global message!", sender_display_name));
-                            }
-
-                            // Auto-scroll chat view IF already at the bottom
-                            let current_max_scroll = app.global_chat_history.len().saturating_sub(app.chat_viewport_height.max(1)).saturating_sub(1); // Max scroll before adding
-                            if app.chat_scroll >= current_max_scroll {
-                                let new_max_scroll = app.global_chat_history.len().saturating_sub(app.chat_viewport_height.max(1));
-                                app.chat_scroll = new_max_scroll;
-                            }
-                             // Otherwise, if user has scrolled up, don't force scroll down.
-
-                            redraw = true;
-                        }
-                        AppEvent::PublishGossipsub(_) => {
-                            // This event is sent TO the swarm task, should not be received here.
-                            // Log if it happens, but otherwise ignore.
-                            app.log("Warning: Received PublishGossipsub event in UI loop.".to_string());
-                        }
-                        AppEvent::SendPrivateMessage { .. } => {
-                            // This event is sent TO the swarm task, should not be received here.
-                            app.log("Warning: Received SendPrivateMessage event in UI loop.".to_string());
-                        }
-                        AppEvent::PrivateMessageReceived { sender_id, content } => {
-                            // app.log(format!("[UI Task] Received PrivateMessageReceived event from {}", sender_id));
-                            // Get sender's nickname from peers map (if known)
-                            let sender_nickname = app.peers.get(&sender_id).and_then(|info| info.nickname.clone());
-
-                            // Get current timestamp
-                            let timestamp_ms = SystemTime::now()
-                                .duration_since(UNIX_EPOCH)
-                                .expect("Time went backwards")
-                                .as_millis() as u64;
-
-                            // Create the chat message struct
-                            let chat_msg = tui::ChatMessage {
-                                sender_id,
-                                sender_nickname, // May be None
-                                content,
-                                timestamp_ms,
-                            };
-
-                            // Add message to the corresponding private history
-                            let history = app.private_chat_histories.entry(sender_id).or_default();
-                            let current_len = history.len(); // Get length before adding for scroll calculation
-                            history.push(tui::PrivateChatItem::Message(chat_msg));
-
-                            // Auto-scroll if the user is currently viewing this private chat
-                            let mut notify_in_console = true; // Assume notification needed by default
-                            if let tui::ChatContext::Private { target_peer_id, .. } = &app.current_chat_context {
-                                if *target_peer_id == sender_id {
-                                    notify_in_console = false; // Don't notify if already viewing
-                                    let current_max_scroll = current_len.saturating_sub(app.chat_viewport_height.max(1));
-                                    if app.chat_scroll >= current_max_scroll {
-                                        let new_max_scroll = history.len().saturating_sub(app.chat_viewport_height.max(1));
-                                        app.chat_scroll = new_max_scroll;
-                                    }
-                                }
-                            }
-
-                            // Add notification to console log if not viewing the private chat
-                            if notify_in_console {
-                                let sender_display_name = app.peers.get(&sender_id)
-                                    .and_then(|info| info.nickname.clone())
-                                    .unwrap_or_else(|| {
-                                        let id_str = sender_id.to_base58();
-                                        let len = id_str.len();
-                                        format!("user(...{})", &id_str[len.saturating_sub(6)..])
-                                    });
-                                app.push(format!("{} sent you a private message!", sender_display_name));
-                            }
-
-                            redraw = true;
-                        }
-                        AppEvent::FileOfferReceived { sender_id, filename, size_bytes } => {
-                            // Get sender's display name (used for console notification)
-                            let sender_display_name = app.peers.get(&sender_id)
-                                .and_then(|info| info.nickname.clone())
-                                .unwrap_or_else(|| {
-                                    let id_str = sender_id.to_base58();
-                                    let len = id_str.len();
-                                    format!("user(...{})", &id_str[len.saturating_sub(6)..])
-                                });
-
-                            // Check if we are currently viewing the private chat with the sender
-                            let mut is_viewing_chat = false;
-                            if let tui::ChatContext::Private { target_peer_id, .. } = &app.current_chat_context {
-                                if *target_peer_id == sender_id {
-                                    is_viewing_chat = true;
-                                }
-                            }
-
-                            // Store/overwrite the pending offer details globally
-                            let offer_details = crate::tui::PendingOfferDetails {
-                                filename: filename.clone(), // Clone filename needed for both maps
-                                size_bytes,
-                                path: PathBuf::new(), // Initialize with an empty path for received offers
-                            };
-                            app.pending_offers.insert(sender_id, offer_details.clone());
-
-                            // ALWAYS add the offer to the specific private chat history
-                            let history = app.private_chat_histories.entry(sender_id).or_default();
-                            let current_len = history.len(); // Get length *before* adding for scroll calculation
-                            history.push(crate::tui::PrivateChatItem::Offer(offer_details)); // Push the cloned details
-
-                            // Decide whether to notify in console or auto-scroll chat
-                            if !is_viewing_chat {
-                                // Show notification in console log
-                                app.push(format!(
-                                    "{} sent you a file offer: {} ({})",
-                                    sender_display_name,
-                                    filename, // Use the original filename from the event
-                                    crate::utils::format_bytes(size_bytes) // Use formatter
-                                ));
-                            } else {
-                                // If viewing the chat, auto-scroll if we were already near the bottom
-                                let current_max_scroll = current_len.saturating_sub(app.chat_viewport_height.max(1));
-                                if app.chat_scroll >= current_max_scroll {
-                                    let new_max_scroll = history.len().saturating_sub(app.chat_viewport_height.max(1));
-                                    app.chat_scroll = new_max_scroll;
-                                }
-                            }
-
-                            redraw = true;
-                        }
-                        AppEvent::SendFileOffer { .. } => {
-                            // This event is sent TO the swarm task, should not be received here.
-                            app.log("Warning: Received SendFileOffer event in UI loop.".to_string());
-                        }
-                        AppEvent::FileOfferDeclined { peer_id, filename } => {
-                            // Get peer's display name
-                            let peer_display_name = app.peers.get(&peer_id)
-                                .and_then(|info| info.nickname.clone())
-                                .unwrap_or_else(|| {
-                                    let id_str = peer_id.to_base58();
-                                    let len = id_str.len();
-                                    format!("user(...{})", &id_str[len.saturating_sub(6)..])
-                                });
-
-                            // Add message to console
-                            app.push(format!("{} declined your offer for '{}'.", peer_display_name, filename));
-
-                            // Add message to the private chat history for that peer
-                            if let Some(history) = app.private_chat_histories.get_mut(&peer_id) {
-                                // Find the original OfferSent details to add RemoteOfferDeclined
-                                // We need to iterate to find the size bytes associated with the filename
-                                let mut offer_details_opt: Option<tui::PendingOfferDetails> = None;
-                                for item in history.iter() {
-                                    if let tui::PrivateChatItem::OfferSent(details) = item {
-                                        if details.filename == filename {
-                                            offer_details_opt = Some(details.clone());
-                                            break; // Found the matching offer
-                                        }
-                                    }
-                                }
-
-                                if let Some(offer_details) = offer_details_opt {
-                                    let current_len = history.len(); // Get length *before* adding
-                                    history.push(tui::PrivateChatItem::RemoteOfferDeclined(offer_details));
-
-                                    // Auto-scroll if viewing this chat
-                                    if let tui::ChatContext::Private { target_peer_id, .. } = &app.current_chat_context {
-                                        if *target_peer_id == peer_id {
-                                            let current_max_scroll = current_len.saturating_sub(app.chat_viewport_height.max(1));
-                                            if app.chat_scroll >= current_max_scroll {
-                                                let new_max_scroll = history.len().saturating_sub(app.chat_viewport_height.max(1));
-                                                app.chat_scroll = new_max_scroll;
-                                            }
-                                        }
-                                    }
-                                } else {
-                                    // Log if we couldn't find the original offer details (should not normally happen)
-                                    app.log(format!("Warning: Could not find original OfferSent details for declined file '{}' from {}", filename, peer_display_name));
-                                }
-                            } else {
-                                // Log if no history exists (also unusual if an offer was sent)
-                                app.log(format!("Warning: No private chat history found for peer {} who declined file '{}'.", peer_display_name, filename));
-                            }
-
-                            redraw = true;
-                        }
-                        AppEvent::FileOfferAccepted { peer_id, filename } => {
-                            // Get peer's display name
-                            let peer_display_name = app.peers.get(&peer_id)
-                                .and_then(|info| info.nickname.clone())
-                                .unwrap_or_else(|| {
-                                    let id_str = peer_id.to_base58();
-                                    let len = id_str.len();
-                                    format!("user(...{})", &id_str[len.saturating_sub(6)..])
-                                });
-
-                            // Add message to console
-                            app.push(format!("{} accepted your offer for '{}'.", peer_display_name, filename));
-
-                            // Add message to the private chat history for that peer
-                            // Find the original OfferSent details to get the path and add RemoteOfferAccepted
-                            let mut found_path: Option<PathBuf> = None;
-                            if let Some(history) = app.private_chat_histories.get_mut(&peer_id) {
-                                let mut offer_details_opt: Option<crate::tui::PendingOfferDetails> = None;
-                                for item in history.iter() {
-                                    if let crate::tui::PrivateChatItem::OfferSent(details) = item {
-                                        if details.filename == filename {
-                                            offer_details_opt = Some(details.clone());
-                                            found_path = Some(details.path.clone()); // <<< Extract the path
-                                            break; // Found the matching offer
-                                        }
-                                    }
-                                }
-
-                                if let Some(offer_details) = offer_details_opt {
-                                    let current_len = history.len(); // Get length *before* adding
-                                    // Pass the full offer_details (which now includes the path) to RemoteOfferAccepted
-                                    history.push(crate::tui::PrivateChatItem::RemoteOfferAccepted(offer_details.clone())); 
-
-                                    // Auto-scroll if viewing this chat
-                                    if let crate::tui::ChatContext::Private { target_peer_id, .. } = &app.current_chat_context {
-                                        if *target_peer_id == peer_id {
-                                            let current_max_scroll = current_len.saturating_sub(app.chat_viewport_height.max(1));
-                                            if app.chat_scroll >= current_max_scroll {
-                                                let new_max_scroll = history.len().saturating_sub(app.chat_viewport_height.max(1));
-                                                app.chat_scroll = new_max_scroll;
-                                            }
-                                        }
-                                    }
-                                } else {
-                                    app.log(format!("Warning: Could not find original OfferSent details for accepted file '{}' from {}", filename, peer_display_name));
-                                }
-                            } else {
-                                app.log(format!("Warning: No private chat history found for peer {} who accepted file '{}'.", peer_display_name, filename));
-                            }
-
-                            // *** Add the mapping to outgoing_transfers ***
-                            if let Some(path) = found_path {
-                                app.outgoing_transfers.insert((peer_id, filename.clone()), path.clone()); // Clone path for map
-                                // Send event to swarm task to register the transfer
-                                let _ = cmd_tx.send(AppEvent::RegisterOutgoingTransfer { 
-                                    peer_id, 
-                                    filename: filename.clone(), 
-                                    path 
-                                });
-                                // app.log(format!("[UI Task] Stored outgoing transfer mapping for '{}' to peer {}", filename, peer_id));
-                            } else {
-                                app.log(format!("Error: Could not find file path for accepted offer '{}' from {}. Cannot start transfer.", filename, peer_display_name));
-                            }
-
-                            redraw = true;
-                        }
-                        AppEvent::SendAcceptOffer { target_peer, filename, size_bytes } => {
-                            let _ = cmd_tx.send(AppEvent::SendAcceptOffer { target_peer, filename, size_bytes });
-                        }
-                        AppEvent::DeclineFileOffer { .. } => {
-                            app.log("Warning: Received unexpected DeclineFileOffer event in UI loop.".to_string());
-                            redraw = true;
-                        }
-                        // --- Handlers for File Transfer Events --- 
-                        AppEvent::FileTransferProgress { peer_id, filename, received, total } => {
-                            // Find the history for this peer
-                            let history = app.private_chat_histories.entry(peer_id).or_default();
-                            let current_len = history.len();
-                            let mut updated_existing = false;
-
-                            // Try to find and update the last progress item for this file
-                            if let Some(last_item) = history.last_mut() {
-                                if let tui::PrivateChatItem::TransferProgress { filename: item_filename, received: item_received, .. } = last_item {
-                                    if *item_filename == filename {
-                                        *item_received = received; // Update in place
-                                        updated_existing = true;
-                                    }
-                                }
-                            }
-
-                            // If no existing progress item was updated, add a new one
-                            if !updated_existing {
-                                history.push(tui::PrivateChatItem::TransferProgress {
-                                    filename: filename.clone(),
-                                    received,
-                                    total,
-                                });
-                            }
-
-                            // Auto-scroll if viewing this chat
-                            if let tui::ChatContext::Private { target_peer_id, .. } = &app.current_chat_context {
-                                if *target_peer_id == peer_id {
-                                    let scroll_target = if updated_existing { current_len } else { history.len() };
-                                    let current_max_scroll = scroll_target.saturating_sub(app.chat_viewport_height.max(1));
-                                    if app.chat_scroll >= current_max_scroll.saturating_sub(1) { // Scroll if near bottom
-                                        app.chat_scroll = current_max_scroll;
-                                    }
-                                }
-                            }
-                            redraw = true;
-                        }
-                        AppEvent::FileTransferComplete { peer_id, filename, path, total_size } => {
-                             // Find the history for this peer
-                            let history = app.private_chat_histories.entry(peer_id).or_default();
-
-                            // Optional: Clean up last progress item for this file
-                            if let Some(last_item) = history.last() {
-                                if matches!(last_item, tui::PrivateChatItem::TransferProgress { filename: item_filename, .. } if *item_filename == filename) {
-                                    history.pop();
-                                }
-                            }
-                        
-                            // Add completion item
-                            history.push(tui::PrivateChatItem::TransferComplete {
-                                filename: filename.clone(),
-                                final_path: path,
-                                size: total_size,
-                            });
-
-                            // Auto-scroll if viewing this chat
-                             if let tui::ChatContext::Private { target_peer_id, .. } = &app.current_chat_context {
-                                if *target_peer_id == peer_id {
-                                    let current_max_scroll = history.len().saturating_sub(app.chat_viewport_height.max(1));
-                                     if app.chat_scroll >= current_max_scroll.saturating_sub(1) { // Scroll if near bottom
-                                        app.chat_scroll = current_max_scroll;
-                                    }
-                                }
-                            }
-
-                            // Add console message as well
-                            // let peer_display_name = app.get_peer_display_name(&peer_id);
-                            let peer_display_name = app.peers.get(&peer_id)
-                                .and_then(|info| info.nickname.clone())
-                                .unwrap_or_else(|| {
-                                    let id_str = peer_id.to_base58();
-                                    format!("user(...{})", &id_str[id_str.len().saturating_sub(6)..])
-                                });
-                            app.push(format!("✅ Download finished: '{}' ({}) from {}", filename, crate::utils::format_bytes(total_size), peer_display_name));
-
-                            redraw = true;
-                        }
-                        AppEvent::FileTransferFailed { peer_id, filename, error } => {
-                           // Find the history for this peer
-                            let history = app.private_chat_histories.entry(peer_id).or_default();
-
-                             // Optional: Clean up last progress item for this file
-                            if let Some(last_item) = history.last() {
-                                if matches!(last_item, tui::PrivateChatItem::TransferProgress { filename: item_filename, .. } if *item_filename == filename) {
-                                    history.pop();
-                                }
-                            }
-
-                            // Add failure item
-                             history.push(tui::PrivateChatItem::TransferFailed {
-                                filename: filename.clone(),
-                                error: error.clone(), // Clone error message
-                            });
-
-                             // Auto-scroll if viewing this chat
-                             if let tui::ChatContext::Private { target_peer_id, .. } = &app.current_chat_context {
-                                if *target_peer_id == peer_id {
-                                     let current_max_scroll = history.len().saturating_sub(app.chat_viewport_height.max(1));
-                                     if app.chat_scroll >= current_max_scroll.saturating_sub(1) { // Scroll if near bottom
-                                        app.chat_scroll = current_max_scroll;
-                                    }
-                                }
-                            }
-                            
-                            // Add console message as well
-                            // let peer_display_name = app.get_peer_display_name(&peer_id);
-                             let peer_display_name = app.peers.get(&peer_id)
-                                .and_then(|info| info.nickname.clone())
-                                .unwrap_or_else(|| {
-                                    let id_str = peer_id.to_base58();
-                                    format!("user(...{})", &id_str[id_str.len().saturating_sub(6)..])
-                                });
-                            app.push(format!("❌ Transfer failed for '{}' from {}: {}", filename, peer_display_name, error));
-                            
-                            redraw = true;
-                        }
-                        // These events are meant for the swarm task, log if received here unexpectedly
-                        AppEvent::DownloadDirChanged(_) => {
-                            app.log("Warning: Received unexpected DownloadDirChanged event in UI loop.".to_string());
-                        }
-                        AppEvent::RegisterOutgoingTransfer { .. } => {
-                             app.log("Warning: Received unexpected RegisterOutgoingTransfer event in UI loop.".to_string());
-                        }
+                    // Check if the application should exit (e.g., user pressed Ctrl+Q).
+                    if app.exit {
+                        // Signal background tasks to stop.
+                        cancel.cancel();
+                        // The main loop's exit condition will handle breaking out.
                     }
                 } else {
-                    // Channel closed, exit
+                    // If the channel is closed, it means producers have stopped; exit the application.
                     app.exit = true;
                 }
             },
 
-            // --- Check for Stale Peers ---
+            // --- Peer Staleness Check ---
+            // Triggered periodically by the `check_peers_interval`.
             _ = check_peers_interval.tick() => {
                 let mut changed = false;
                 let now = Instant::now();
-                let timeout = constants::PEER_TIMEOUT; // Updated usage
-                let mut timed_out_peers = Vec::new(); // Collect timed out peers
+                let timeout = constants::PEER_TIMEOUT;
 
-                for (peer_id, peer_info) in app.peers.iter_mut() { // Iterate mutably
+                // Iterate through known peers and mark those inactive for too long as Offline.
+                for (_peer_id, peer_info) in app.peers.iter_mut() {
                     if peer_info.status == OnlineStatus::Online && now.duration_since(peer_info.last_seen) > timeout {
                         peer_info.status = OnlineStatus::Offline;
                         changed = true;
-                        timed_out_peers.push(*peer_id); // Store the PeerId
-                        // Log when timeout occurs - MOVED outside loop
+                        // Logging the specific timed-out peer can be verbose; consider if needed.
                         // app.push(format!("[UI] Marked peer {:?} offline due to timeout (> {:?})", peer_id, timeout));
                     }
                 }
 
-                // Log timed out peers after the loop
-                // if !timed_out_peers.is_empty() {
-                //     let peer_ids_str = timed_out_peers.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(", ");
-                //     app.push(format!("[UI] Marked peers offline due to timeout (> {:?}): {}", timeout, peer_ids_str));
-                // }
-
+                // Mark UI for redraw if any peer status changed.
                 if changed {
                     redraw = true;
                 }
             }
         }
 
+        // Exit the main loop if the exit flag is set.
         if app.exit {
             break;
         }
     }
 
-
-    // --- Restore terminal to original state ---
+    // --- Terminal Restoration ---
+    // Restore the terminal to its original state before the application started.
     ratatui::restore();
 
     Ok(())

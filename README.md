@@ -135,4 +135,6 @@ To connect to peers on another network, a rendezvous server is required. The fil
 
 SwapBytes is released under the **MIT License**. See the LICENSE file.
 
+Note that the contents of `rendezvous/` is derived from https://github.com/libp2p/rust-libp2p and is not apart of SwapBytes.
+
 ---

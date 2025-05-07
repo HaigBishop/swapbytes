@@ -12,14 +12,14 @@ SwapBytes is a **CLI/TUI application** that lets users **barter files directly w
 - Written in **Rust 2024**.
 - Networked with **libp2p** (pub-sub + request/response).
 - Cross-platform (Linux, macOS, Windows).
-- No central server required – discovery via **mDNS** on-LAN.
+- No central server required – discovery via **mDNS** on-LAN or rendezvous server on other networks.
 
 
 ---
 
 ## Building & Running
 
-To install and run SwapBytes  simplying clone the GitHub repository and run `cargo run`. Rust is required.
+To install and run SwapBytes simplying clone the GitHub repository and run `cargo run`. Rust is required.
 
 ```bash
 # Clone
@@ -48,6 +48,8 @@ Using SwapBytes involves running commands such as `/setname <name>` in the conso
 ## Demo
 
 **See the [demo.md](demo.md) for a visual walk-through.**
+
+![Screenshot 7](demo_screenshots/7.png) 
 
 ---
 
